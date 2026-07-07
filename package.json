@@ -1,7 +1,7 @@
 {
   "name": "ledger-video-recorder",
   "version": "0.1.0",
-  "description": "Loom-style screen + webcam recorder with a simple, premium editor",
+  "description": "Screen + webcam recorder with a simple, premium editor",
   "main": "./out/main/index.js",
   "author": "Qin Tjokrosurjo",
   "license": "MIT",

@@ -1,7 +1,7 @@
 # Ledger Video Recorder
 
 A free, open-source **screen + webcam recorder** for macOS — record your screen and
-camera together (Loom-style), then trim, split, reposition the camera bubble, add a
+camera together, then trim, split, reposition the camera bubble, add a
 background, and drop in smooth zoom punch-ins, all in a simple built-in editor. Export
 an MP4 and you're done.
 
