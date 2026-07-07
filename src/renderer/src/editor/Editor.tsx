@@ -169,6 +169,8 @@ export default function Editor(): JSX.Element {
         p.zooms.sort((a, b) => a.start - b.start)
       })
       setSelectedZoom(id)
+      // Move the playhead into the "hold" of the punch-in so the zoom shows now.
+      if (end - start > 0.9) seek(outputTime + 0.7)
     } else {
       updateProject((p) => {
         const z = p.zooms.find((z) => z.id === zoomArm)
@@ -181,7 +183,10 @@ export default function Editor(): JSX.Element {
     setZoomArm(null)
   }
 
-  const activeZoom = project.zooms.find((z) => z.id === (zoomArm !== 'new' ? zoomArm : null) || z.id === selectedZoom) || null
+  const activeZoom =
+    project.zooms.find(
+      (z) => z.id === selectedZoom || (zoomArm !== null && zoomArm !== 'new' && z.id === zoomArm)
+    ) || null
 
   async function handleExport(format: 'webm' | 'mp4'): Promise<void> {
     if (!screenRef.current) return

@@ -171,7 +171,7 @@ export default function Timeline({
               onClick={(ev) => {
                 ev.stopPropagation()
                 onSelectZoom(z.id)
-                onSeek(s)
+                onSeek((s + e) / 2)
               }}
               className={cn(
                 'absolute top-1 h-3 rounded-full border z-20 flex items-center justify-center',
