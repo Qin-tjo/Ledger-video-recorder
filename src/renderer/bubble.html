@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; media-src 'self' blob: mediastream:; style-src 'unsafe-inline'; script-src 'self'"
+    />
+    <title>Camera</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: transparent;
+        overflow: hidden;
+        -webkit-app-region: drag;
+        width: 200px;
+        height: 200px;
+      }
+      /* Center a smaller circle inside a transparent 200px window so the shadow and
+         white ring fade out well before the window edge — no grey square corners. */
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #cam {
+        width: 168px;
+        height: 168px;
+        object-fit: cover;
+        border-radius: 50%;
+        transform: scaleX(-1);
+        box-shadow:
+          0 0 0 3px rgba(255, 255, 255, 0.95),
+          0 4px 14px rgba(0, 0, 0, 0.3);
+      }
+    </style>
+  </head>
+  <body>
+    <video id="cam" autoplay muted playsinline></video>
+    <script type="module" src="./src/bubble.ts"></script>
+  </body>
+</html>

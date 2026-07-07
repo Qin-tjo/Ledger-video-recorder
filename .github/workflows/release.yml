@@ -1,0 +1,43 @@
+name: Release
+
+# Builds the macOS app and attaches it to a GitHub Release when you push a
+# version tag, e.g.:  git tag v0.1.0 && git push origin v0.1.0
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-mac:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Package (.dmg + .zip, unsigned)
+        run: npx electron-builder --mac --publish never
+        env:
+          # Don't attempt Apple code-signing/notarization in CI (no certs).
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Publish to a draft Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            dist/*.dmg
+            dist/*.zip

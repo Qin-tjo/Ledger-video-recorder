@@ -1,0 +1,45 @@
+appId: com.ledgervideorecorder.app
+productName: Ledger Video Recorder
+afterSign: build/notarize.cjs
+directories:
+  output: dist
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+# The ffmpeg binary is native and must live outside the asar archive so it can be spawned.
+asarUnpack:
+  - node_modules/@ffmpeg-installer/**
+mac:
+  category: public.app-category.productivity
+  target:
+    - dmg
+    - zip
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    NSCameraUsageDescription: Ledger Video Recorder uses your camera to record your video for presentations.
+    NSMicrophoneUsageDescription: Ledger Video Recorder uses your microphone to record narration.
+    NSScreenCaptureUsageDescription: Ledger Video Recorder records your screen to create presentations.
+dmg:
+  background: build/dmg-background.png
+  iconSize: 100
+  window:
+    width: 540
+    height: 380
+  contents:
+    - x: 140
+      y: 205
+      type: file
+    - x: 400
+      y: 205
+      type: link
+      path: /Applications
+win:
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
