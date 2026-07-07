@@ -22,17 +22,30 @@ function pickMime(): string {
   return c.find((m) => MediaRecorder.isTypeSupported(m)) || 'video/webm'
 }
 
+/** A detached, ready-to-use video element for rendering during export. */
+function makeVideo(src: string, muted: boolean): Promise<HTMLVideoElement> {
+  const v = document.createElement('video')
+  v.src = src
+  v.preload = 'auto'
+  v.muted = muted
+  v.playsInline = true
+  return new Promise((resolve, reject) => {
+    const ok = (): void => {
+      v.removeEventListener('loadeddata', ok)
+      resolve(v)
+    }
+    v.addEventListener('loadeddata', ok)
+    v.addEventListener('error', () => reject(new Error('Failed to load media for export')))
+  })
+}
+
 /**
- * Renders the project composition to a WebM Blob by stepping the source videos
- * frame-by-frame and drawing via the SAME renderFrame used for preview.
- * Audio is taken live from the screen video element's captured stream.
+ * Renders the project composition to a WebM Blob using its OWN detached video
+ * elements (so the editor preview is untouched). Audio is routed through the
+ * Web Audio graph into the recording — NOT to the speakers — so nothing plays
+ * aloud during export. Uses the same renderFrame() as the live preview.
  */
-export async function exportProject(
-  project: Project,
-  screen: HTMLVideoElement,
-  camera: HTMLVideoElement | null,
-  opts: ExportOpts = {}
-): Promise<Blob> {
+export async function exportProject(project: Project, opts: ExportOpts = {}): Promise<Blob> {
   const fps = opts.fps ?? 30
   const total = totalDuration(project)
   const canvas = document.createElement('canvas')
@@ -40,27 +53,24 @@ export async function exportProject(
   canvas.height = project.outputHeight
   const ctx = canvas.getContext('2d')!
 
-  const wasPlaying = !screen.paused
-  screen.pause()
-  camera?.pause()
+  const screen = await makeVideo(project.screenSrc, false)
+  const camera = project.cameraSrc ? await makeVideo(project.cameraSrc, true) : null
 
   const videoStream = canvas.captureStream(fps)
 
-  // Attach audio from the screen element (holds the mic track).
+  // Route the screen element's audio (which holds the mic track) into the
+  // recording via Web Audio, connected ONLY to a stream destination — never to
+  // audioCtx.destination — so it is captured but never audible.
+  const audioCtx = new AudioContext()
+  await audioCtx.resume().catch(() => {})
   try {
-    // capture the element's audio into the stream
-    const el = screen as HTMLMediaElement & {
-      captureStream?: () => MediaStream
-      mozCaptureStream?: () => MediaStream
-    }
-    const capture = el.captureStream || el.mozCaptureStream
-    if (capture) {
-      const elStream = capture.call(el)
-      const audioTrack = elStream.getAudioTracks()[0]
-      if (audioTrack) videoStream.addTrack(audioTrack)
-    }
+    const srcNode = audioCtx.createMediaElementSource(screen)
+    const dest = audioCtx.createMediaStreamDestination()
+    srcNode.connect(dest)
+    const track = dest.stream.getAudioTracks()[0]
+    if (track) videoStream.addTrack(track)
   } catch {
-    // no audio — export video only
+    // no audio track available — export silent video
   }
 
   const mime = pickMime()
@@ -70,21 +80,18 @@ export async function exportProject(
   })
   const chunks: Blob[] = []
   recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data)
-
   const done = new Promise<Blob>((resolve) => {
     recorder.onstop = () => resolve(new Blob(chunks, { type: mime }))
   })
 
-  // Play each clip's source range in order, in real time (keeps audio aligned),
-  // drawing the composed canvas from the current frame.
+  // Play each clip's source range in order, drawing the composed canvas.
   recorder.start()
-  screen.muted = false
   let outAcc = 0
   for (const clip of project.clips) {
     await seek(screen, clip.inPoint)
-    if (camera) camera.currentTime = clip.inPoint
-    screen.play()
-    camera?.play()
+    if (camera) await seek(camera, clip.inPoint)
+    await screen.play().catch(() => {})
+    camera?.play().catch(() => {})
     await new Promise<void>((resolve) => {
       const step = (): void => {
         const t = screen.currentTime
@@ -106,9 +113,12 @@ export async function exportProject(
   }
 
   recorder.stop()
-
   const blob = await done
   opts.onProgress?.(1)
-  void wasPlaying
+
+  // cleanup
+  audioCtx.close().catch(() => {})
+  screen.src = ''
+  if (camera) camera.src = ''
   return blob
 }

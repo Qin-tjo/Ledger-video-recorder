@@ -39,7 +39,7 @@ export default function Editor(): JSX.Element {
     []
   )
 
-  const { playing, sourceTime, outputTime, toggle, seek } = usePlayback(project, refs)
+  const { playing, sourceTime, outputTime, toggle, pause, seek } = usePlayback(project, refs)
 
   const [exporting, setExporting] = useState(false)
   const [progress, setProgress] = useState(0)
@@ -189,15 +189,14 @@ export default function Editor(): JSX.Element {
     ) || null
 
   async function handleExport(format: 'webm' | 'mp4'): Promise<void> {
-    if (!screenRef.current) return
+    if (!project) return
+    pause() // stop the preview so nothing plays during export
     setExporting(true)
     setProgress(0)
     setSavedPath(null)
     setExportError(null)
     try {
-      const blob = await exportProject(project!, screenRef.current, cameraRef.current, {
-        onProgress: setProgress
-      })
+      const blob = await exportProject(project, { onProgress: setProgress })
       const buf = await blob.arrayBuffer()
       const suggested = `recording.${format}`
       const res = await window.ledger.export.save(buf, format, suggested)
