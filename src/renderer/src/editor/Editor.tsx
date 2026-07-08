@@ -475,17 +475,11 @@ export default function Editor(): JSX.Element {
                       className="w-full"
                       onClick={() => handleExport('mp4')}
                     >
-                      Export as MP4
-                    </Button>
-                    <Button
-                      variant="subtle"
-                      className="w-full"
-                      onClick={() => handleExport('webm')}
-                    >
-                      Export as WebM
+                      Export video (MP4)
                     </Button>
                     <p className="text-[11px] text-white/35 text-center pt-1">
-                      Rendering runs in real time to preserve audio sync.
+                      Exports an MP4 that plays everywhere. Rendering runs in real time to
+                      preserve audio sync.
                     </p>
                   </div>
                 )}
