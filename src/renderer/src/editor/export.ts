@@ -1,5 +1,5 @@
 import type { Project } from '../lib/types'
-import { clipDur, renderFrame, totalDuration } from '../lib/composite'
+import { clipDur, renderFrame, resetAutoGain, totalDuration } from '../lib/composite'
 
 interface ExportOpts {
   fps?: number
@@ -85,6 +85,7 @@ export async function exportProject(project: Project, opts: ExportOpts = {}): Pr
   })
 
   // Play each clip's source range in order, drawing the composed canvas.
+  resetAutoGain() // meter this render from scratch, not the preview's state
   recorder.start()
   let outAcc = 0
   for (const clip of project.clips) {

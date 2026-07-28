@@ -14,6 +14,8 @@ an MP4 and you're done.
 - ✂️ **Clip editor** — split, delete (ripple), and drag-to-trim clips on a thumbnail timeline
 - 🔍 **One-click zoom punch-ins** — click a spot on the preview for a smooth zoom-in → hold → zoom-out
 - 🟣 **Camera bubble** — circle/rounded/square, resizable, draggable, with corner snapping
+- 💡 **Studio light** — warm, soft lighting for your camera that auto-adapts to your room,
+  so a dim or backlit setup still looks good
 - 🎨 **Backgrounds** — solid or gradient with padding, so the screen sits on a backdrop
 - ↩️ **Undo / redo** everywhere
 - 💾 **Export** to MP4 (H.264/AAC) or WebM, saved locally

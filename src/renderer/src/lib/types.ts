@@ -14,6 +14,17 @@ export interface CameraLayout {
   corner: CameraCorner
   mirror: boolean
   border: boolean
+  studio: StudioLook
+}
+
+/** Warm "studio lighting" grade for the camera. `autoLight` measures the actual
+ * frame brightness and lifts/pulls exposure so dim or harsh rooms still land in
+ * a flattering range. */
+export interface StudioLook {
+  enabled: boolean
+  intensity: number // 0..1 overall strength of the grade
+  warmth: number // 0..1 golden-hour tint
+  autoLight: boolean
 }
 
 export interface Background {
@@ -70,7 +81,8 @@ export const defaultProject = (): Project => ({
     y: 0.83,
     corner: 'bl',
     mirror: true,
-    border: true
+    border: true,
+    studio: { enabled: true, intensity: 0.6, warmth: 0.5, autoLight: true }
   },
   background: {
     mode: 'none',

@@ -21,6 +21,12 @@ export default function Inspector({
   const slide = (fn: (p: Project) => void): void => update(fn, { coalesce: true })
   const cam = project.camera
   const bg = project.background
+  const studio = cam.studio ?? {
+    enabled: true,
+    intensity: 0.6,
+    warmth: 0.5,
+    autoLight: true
+  }
 
   return (
     <div className="space-y-6">
@@ -113,6 +119,60 @@ export default function Inspector({
           <p className="text-[12px] text-white/35">No camera was recorded.</p>
         )}
       </section>
+
+      {cam.enabled && project.cameraSrc && (
+        <>
+          <Divider />
+
+          {/* Studio lighting */}
+          <section>
+            <SectionHeader
+              title="Studio light"
+              right={
+                <Toggle
+                  on={studio.enabled}
+                  onChange={(v) => update((p) => (p.camera.studio.enabled = v))}
+                />
+              }
+            />
+            {studio.enabled ? (
+              <div className="space-y-4">
+                <Field label="Strength" hint={`${Math.round(studio.intensity * 100)}%`}>
+                  <Slider
+                    min={0.1}
+                    max={1}
+                    step={0.05}
+                    value={studio.intensity}
+                    onChange={(v) => slide((p) => (p.camera.studio.intensity = v))}
+                  />
+                </Field>
+                <Field label="Warmth" hint={`${Math.round(studio.warmth * 100)}%`}>
+                  <Slider
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={studio.warmth}
+                    onChange={(v) => slide((p) => (p.camera.studio.warmth = v))}
+                  />
+                </Field>
+                <MiniToggle
+                  label="Auto light"
+                  on={studio.autoLight}
+                  onChange={(v) => update((p) => (p.camera.studio.autoLight = v))}
+                />
+                <p className="text-[11px] text-white/35">
+                  Auto light reads your room's brightness and lifts dim or harsh lighting
+                  into a flattering range.
+                </p>
+              </div>
+            ) : (
+              <p className="text-[12px] text-white/35">
+                Adds warm, soft studio lighting to your camera.
+              </p>
+            )}
+          </section>
+        </>
+      )}
 
       <Divider />
 

@@ -1,4 +1,4 @@
-import type { Clip, Project, ZoomEffect } from './types'
+import type { Clip, Project, StudioLook, ZoomEffect } from './types'
 import { uid } from './uid'
 
 // Clip model ---------------------------------------------------------------
@@ -231,6 +231,85 @@ export function renderFrame(
   }
 }
 
+// Studio look -------------------------------------------------------------
+// Auto-exposure: periodically measure the camera frame's mean luminance on a
+// tiny offscreen canvas and derive a gain that pulls it toward a flattering
+// midtone. Sampling is throttled and smoothed so the light drifts, never pops.
+
+const LUMA_W = 48
+const LUMA_H = 27
+// How bright the shadow end of the picture should sit. Faces that fall below
+// this are the ones that read as "badly lit".
+const TARGET_SHADOW = 0.34
+const SHADOW_PERCENTILE = 0.3
+let lumaCanvas: HTMLCanvasElement | null = null
+let lumaCtx: CanvasRenderingContext2D | null = null
+let lastSampleAt = -1e9
+let fillLight = 0
+
+/**
+ * How much fill light this frame needs, 0..0.65, smoothed over time.
+ *
+ * Measures the SHADOW end of the histogram (30th percentile) rather than the
+ * average. Average metering is fooled whenever the subject is backlit — a bright
+ * window drags the mean up and the face gets darkened. Shadow metering doesn't
+ * care where the face is: if a meaningful part of the picture is too dark, it
+ * lifts, and the `screen` blend it drives leaves the highlights alone.
+ */
+export function cameraFillLight(cam: HTMLVideoElement): number {
+  const now = typeof performance !== 'undefined' ? performance.now() : 0
+  if (now - lastSampleAt < 350 || cam.videoWidth === 0) return fillLight
+  lastSampleAt = now
+
+  if (!lumaCanvas) {
+    lumaCanvas = document.createElement('canvas')
+    lumaCanvas.width = LUMA_W
+    lumaCanvas.height = LUMA_H
+    lumaCtx = lumaCanvas.getContext('2d', { willReadFrequently: true })
+  }
+  if (!lumaCtx) return fillLight
+
+  try {
+    lumaCtx.drawImage(cam, 0, 0, LUMA_W, LUMA_H)
+    const d = lumaCtx.getImageData(0, 0, LUMA_W, LUMA_H).data
+    const hist = new Uint32Array(256)
+    const pixels = d.length / 4
+    for (let i = 0; i < d.length; i += 4) {
+      const l = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]
+      hist[l | 0]++
+    }
+    // Walk the histogram to the shadow percentile.
+    const cutoff = pixels * SHADOW_PERCENTILE
+    let acc = 0
+    let shadow = 0
+    for (let b = 0; b < 256; b++) {
+      acc += hist[b]
+      if (acc >= cutoff) {
+        shadow = b / 255
+        break
+      }
+    }
+    const need = Math.max(0, Math.min(0.65, (TARGET_SHADOW - shadow) * 2.0))
+    fillLight += (need - fillLight) * 0.3 // temporal smoothing
+  } catch {
+    // frame not readable yet — keep the previous value
+  }
+  return fillLight
+}
+
+/** Reset metering between renders that start fresh (e.g. an export run). */
+export function resetAutoGain(): void {
+  lastSampleAt = -1e9
+  fillLight = 0
+}
+
+const DEFAULT_STUDIO: StudioLook = {
+  enabled: true,
+  intensity: 0.6,
+  warmth: 0.5,
+  autoLight: true
+}
+
 function drawCamera(
   ctx: CanvasRenderingContext2D,
   p: Project,
@@ -280,11 +359,67 @@ function drawCamera(
   const dx = x + (size - dw) / 2
   const dy = y + (size - dh) / 2
 
+  const st = p.camera.studio ?? DEFAULT_STUDIO
+  const k = st.enabled ? Math.max(0, Math.min(1, st.intensity)) : 0
+  const warm = Math.max(0, Math.min(1, st.warmth))
+
+  // --- image passes (mirrored with the source) ---
+  ctx.save()
   if (p.camera.mirror) {
     ctx.translate(x + size / 2, 0)
     ctx.scale(-1, 1)
     ctx.translate(-(x + size / 2), 0)
   }
-  ctx.drawImage(cam, dx, dy, dw, dh)
+
+  if (k === 0) {
+    ctx.drawImage(cam, dx, dy, dw, dh)
+  } else {
+    const need = st.autoLight ? cameraFillLight(cam) : 0.12
+
+    // 1. Base pass: contrast, saturation and a warm bias.
+    ctx.filter =
+      `brightness(${(1 + 0.06 * k).toFixed(3)}) ` +
+      `contrast(${(1 + 0.14 * k).toFixed(3)}) ` +
+      `saturate(${(1 + 0.28 * k).toFixed(3)}) ` +
+      `sepia(${(0.22 * k * warm).toFixed(3)})`
+    ctx.drawImage(cam, dx, dy, dw, dh)
+    ctx.filter = 'none'
+
+    // 2. Fill light. `screen` raises shadows hard while barely touching
+    //    highlights, so an underexposed face comes up without blowing out a
+    //    window behind it — what a bounce card does on a real set.
+    const fill = need * k
+    if (fill > 0.005) {
+      ctx.globalCompositeOperation = 'screen'
+      ctx.globalAlpha = fill
+      ctx.drawImage(cam, dx, dy, dw, dh)
+      ctx.globalAlpha = 1
+      ctx.globalCompositeOperation = 'source-over'
+    }
+
+    // 3. Soft diffusion — a blurred, brightened copy lightened back on top.
+    //    This is what reads as a big softbox rather than a bare webcam.
+    ctx.globalCompositeOperation = 'lighten'
+    ctx.globalAlpha = 0.3 * k
+    ctx.filter = `blur(${Math.max(1, size * 0.04).toFixed(2)}px) brightness(1.15)`
+    ctx.drawImage(cam, dx, dy, dw, dh)
+    ctx.filter = 'none'
+    ctx.globalAlpha = 1
+    ctx.globalCompositeOperation = 'source-over'
+  }
+  ctx.restore()
+
+  // --- warm key light (not mirrored: it's a light, not part of the image) ---
+  if (k > 0 && warm > 0) {
+    ctx.save()
+    ctx.globalCompositeOperation = 'soft-light'
+    const g = ctx.createLinearGradient(x, y, x + size, y + size)
+    g.addColorStop(0, `rgba(255, 190, 120, ${(0.85 * k * warm).toFixed(3)})`)
+    g.addColorStop(1, `rgba(255, 140, 80, ${(0.3 * k * warm).toFixed(3)})`)
+    ctx.fillStyle = g
+    ctx.fillRect(x, y, size, size)
+    ctx.restore()
+  }
+
   ctx.restore()
 }
