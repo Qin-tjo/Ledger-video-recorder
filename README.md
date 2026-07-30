@@ -12,6 +12,8 @@ an MP4 and you're done.
 
 - 🎥 **Record screen + camera + mic** together, with a live floating camera bubble
 - ✂️ **Clip editor** — split, delete (ripple), and drag-to-trim clips on a thumbnail timeline
+- 🔲 **Crop the recording area** — drag a box over the preview to keep just the region you
+  want; the exported video is sized to exactly that area
 - 🔍 **One-click zoom punch-ins** — click a spot on the preview for a smooth zoom-in → hold → zoom-out
 - 🟣 **Camera bubble** — circle/rounded/square, resizable, draggable, with corner snapping
 - 💡 **Studio light** — warm, soft lighting for your camera that auto-adapts to your room,

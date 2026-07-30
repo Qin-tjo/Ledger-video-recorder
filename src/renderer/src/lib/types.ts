@@ -55,11 +55,21 @@ export interface Clip {
   outPoint: number // source seconds
 }
 
+/** A region of the source screen recording to keep, normalized 0..1. */
+export interface CropRect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
 export interface Project {
   screenSrc: string // blob/file url
   cameraSrc: string | null
   duration: number // seconds (source)
   clips: Clip[]
+  /** null = use the whole screen recording. */
+  crop: CropRect | null
   camera: CameraLayout
   background: Background
   zooms: ZoomEffect[]
@@ -72,6 +82,7 @@ export const defaultProject = (): Project => ({
   cameraSrc: null,
   duration: 0,
   clips: [],
+  crop: null,
   camera: {
     enabled: true,
     shape: 'circle',

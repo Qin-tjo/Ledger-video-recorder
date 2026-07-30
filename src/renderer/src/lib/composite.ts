@@ -1,4 +1,4 @@
-import type { Clip, Project, StudioLook, ZoomEffect } from './types'
+import type { Clip, CropRect, Project, StudioLook, ZoomEffect } from './types'
 import { uid } from './uid'
 
 // Clip model ---------------------------------------------------------------
@@ -207,12 +207,19 @@ export function renderFrame(
   }
 
   if (screenVideo.videoWidth > 0) {
-    // object-fit: cover within rect
+    // Source region: the crop if one is set, otherwise the whole frame.
     const vw = screenVideo.videoWidth
     const vh = screenVideo.videoHeight
-    const scale = Math.max(rect.w / vw, rect.h / vh) * z.scale
-    const dw = vw * scale
-    const dh = vh * scale
+    const c = p.crop
+    const sx = c ? c.x * vw : 0
+    const sy = c ? c.y * vh : 0
+    const sw = Math.max(1, c ? c.w * vw : vw)
+    const sh = Math.max(1, c ? c.h * vh : vh)
+
+    // object-fit: cover within rect
+    const scale = Math.max(rect.w / sw, rect.h / sh) * z.scale
+    const dw = sw * scale
+    const dh = sh * scale
     // center on focus point
     const fx = rect.x + rect.w * z.focusX
     const fy = rect.y + rect.h * z.focusY
@@ -221,7 +228,7 @@ export function renderFrame(
     // clamp so we never show empty edges
     dx = Math.min(rect.x, Math.max(rect.x + rect.w - dw, dx))
     dy = Math.min(rect.y, Math.max(rect.y + rect.h - dh, dy))
-    ctx.drawImage(screenVideo, dx, dy, dw, dh)
+    ctx.drawImage(screenVideo, sx, sy, sw, sh, dx, dy, dw, dh)
   }
   ctx.restore()
 
@@ -229,6 +236,28 @@ export function renderFrame(
   if (p.camera.enabled && cameraVideo && cameraVideo.videoWidth > 0) {
     drawCamera(ctx, p, cameraVideo, W, H)
   }
+}
+
+// Output sizing -----------------------------------------------------------
+
+const MAX_OUT_H = 1080
+const MAX_OUT_W = 2560
+const even = (v: number): number => Math.max(2, Math.round(v) - (Math.round(v) % 2))
+
+/**
+ * Output dimensions for a given source size and crop. The video matches the
+ * shape of what you actually kept, so cropping never letterboxes or re-crops —
+ * you get exactly the region you chose. H.264 needs even dimensions.
+ */
+export function outputSizeFor(
+  sourceW: number,
+  sourceH: number,
+  crop: CropRect | null
+): { width: number; height: number } {
+  const w = Math.max(1, (crop ? crop.w : 1) * sourceW)
+  const h = Math.max(1, (crop ? crop.h : 1) * sourceH)
+  const scale = Math.min(1, MAX_OUT_H / h, MAX_OUT_W / w)
+  return { width: even(w * scale), height: even(h * scale) }
 }
 
 // Studio look -------------------------------------------------------------

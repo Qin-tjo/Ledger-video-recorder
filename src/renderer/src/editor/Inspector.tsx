@@ -8,6 +8,8 @@ interface Props {
   onSelectZoom: (id: string | null) => void
   onAddZoom: () => void
   onRefocusZoom: (id: string) => void
+  onCropStart: () => void
+  onCropReset: () => void
 }
 
 export default function Inspector({
@@ -16,7 +18,9 @@ export default function Inspector({
   selectedZoom,
   onSelectZoom,
   onAddZoom,
-  onRefocusZoom
+  onRefocusZoom,
+  onCropStart,
+  onCropReset
 }: Props): JSX.Element {
   const slide = (fn: (p: Project) => void): void => update(fn, { coalesce: true })
   const cam = project.camera
@@ -173,6 +177,30 @@ export default function Inspector({
           </section>
         </>
       )}
+
+      <Divider />
+
+      {/* Crop */}
+      <section>
+        <SectionHeader title="Recording area" />
+        <div className="space-y-3">
+          <p className="text-[12px] text-white/40">
+            {project.crop
+              ? 'Cropped. The video is sized to the area you kept.'
+              : 'Using the whole screen recording.'}
+          </p>
+          <div className="flex gap-2">
+            <Button size="sm" variant="subtle" className="flex-1" onClick={onCropStart}>
+              {project.crop ? 'Adjust crop' : 'Crop area'}
+            </Button>
+            {project.crop && (
+              <Button size="sm" variant="ghost" onClick={onCropReset}>
+                Reset
+              </Button>
+            )}
+          </div>
+        </div>
+      </section>
 
       <Divider />
 

@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { CropRect } from '../lib/types'
+import CropOverlay from './CropOverlay'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useApp } from '../store'
 import { Button, Panel, cn } from '../components/ui'
-import { deleteClip, splitAt, totalDuration, trimClip } from '../lib/composite'
+import { deleteClip, outputSizeFor, splitAt, totalDuration, trimClip } from '../lib/composite'
 import { uid } from '../lib/uid'
 import { usePlayback } from './usePlayback'
 import { exportProject } from './export'
@@ -39,8 +41,6 @@ export default function Editor(): JSX.Element {
     []
   )
 
-  const { playing, sourceTime, outputTime, toggle, pause, seek } = usePlayback(project, refs)
-
   const [exporting, setExporting] = useState(false)
   const [progress, setProgress] = useState(0)
   const [showExport, setShowExport] = useState(false)
@@ -51,6 +51,26 @@ export default function Editor(): JSX.Element {
   // When set, the next preview click places a zoom: 'new' creates one; a string
   // id re-aims that existing zoom's focus point.
   const [zoomArm, setZoomArm] = useState<null | 'new' | string>(null)
+  // Crop editing: while active the preview shows the FULL frame so you can pick
+  // a region, and `draftCrop` is the rectangle being dragged.
+  const [draftCrop, setDraftCrop] = useState<CropRect | null>(null)
+  const [source, setSource] = useState<{ w: number; h: number } | null>(null)
+
+  // While cropping, preview the uncropped frame at the source's own shape so the
+  // overlay maps 1:1 onto the picture.
+  const previewProject = useMemo(() => {
+    if (!project) return project
+    if (!draftCrop) return project
+    const full = source
+      ? outputSizeFor(source.w, source.h, null)
+      : { width: project.outputWidth, height: project.outputHeight }
+    return { ...project, crop: null, outputWidth: full.width, outputHeight: full.height }
+  }, [project, draftCrop, source])
+
+  const { playing, sourceTime, outputTime, toggle, pause, seek } = usePlayback(
+    previewProject,
+    refs
+  )
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -104,6 +124,40 @@ export default function Editor(): JSX.Element {
     if (!selectedClip || !project || project.clips.length <= 1) return
     updateProject((p) => (p.clips = deleteClip(p.clips, selectedClip)))
     setSelectedClip(null)
+  }
+
+  // --- Crop ---
+  function beginCrop(): void {
+    pause()
+    setDraftCrop(project!.crop ?? { x: 0.06, y: 0.06, w: 0.88, h: 0.88 })
+  }
+
+  function applyCrop(): void {
+    if (!draftCrop) return
+    const crop = draftCrop
+    const src = source
+    updateProject((p) => {
+      p.crop = crop
+      if (src) {
+        const out = outputSizeFor(src.w, src.h, crop)
+        p.outputWidth = out.width
+        p.outputHeight = out.height
+      }
+    })
+    setDraftCrop(null)
+  }
+
+  function resetCrop(): void {
+    const src = source
+    updateProject((p) => {
+      p.crop = null
+      if (src) {
+        const out = outputSizeFor(src.w, src.h, null)
+        p.outputWidth = out.width
+        p.outputHeight = out.height
+      }
+    })
+    setDraftCrop(null)
   }
 
   // Camera drag on the stage
@@ -210,7 +264,9 @@ export default function Editor(): JSX.Element {
   }
 
   const camSize = project.camera.size
-  const aspect = project.outputWidth / project.outputHeight
+  // The stage/canvas follow the preview project so crop mode shows the full frame.
+  const view = previewProject ?? project
+  const aspect = view.outputWidth / view.outputHeight
 
   return (
     <div className="h-full flex flex-col">
@@ -220,7 +276,16 @@ export default function Editor(): JSX.Element {
           ← New recording
         </Button>
         <h1 className="text-sm font-medium text-white/60">Editor</h1>
-        <Button variant="primary" size="sm" onClick={() => setShowExport(true)}>
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={() => {
+            // Always reopen ready to export again, not on the previous result.
+            setSavedPath(null)
+            setExportError(null)
+            setShowExport(true)
+          }}
+        >
           Export
         </Button>
       </header>
@@ -241,10 +306,13 @@ export default function Editor(): JSX.Element {
             >
               <canvas
                 ref={canvasRef}
-                width={project.outputWidth}
-                height={project.outputHeight}
+                width={view.outputWidth}
+                height={view.outputHeight}
                 className="w-full h-full block"
               />
+              {draftCrop && (
+                <CropOverlay rect={draftCrop} onChange={setDraftCrop} />
+              )}
               {zoomArm && (
                 <div className="absolute inset-0 grid place-items-center bg-black/30 pointer-events-none">
                   <span className="text-sky-200 text-sm font-medium bg-black/60 px-3 py-1.5 rounded-lg">
@@ -274,7 +342,7 @@ export default function Editor(): JSX.Element {
                   aria-label="Drag to reposition camera"
                   className={cn(
                     'absolute cursor-grab active:cursor-grabbing rounded-full ring-2 ring-white/0 hover:ring-accent/60 transition',
-                    zoomArm && 'pointer-events-none'
+                    (zoomArm || draftCrop) && 'pointer-events-none opacity-0'
                   )}
                   style={{
                     left: `${project.camera.x * 100}%`,
@@ -290,28 +358,50 @@ export default function Editor(): JSX.Element {
             </div>
           </div>
 
-          {/* Transport */}
-          <div className="flex items-center gap-4">
-            <Button
-              variant="ghost"
-              size="md"
-              aria-label="Restart"
-              onClick={() => seek(0)}
-              className="w-11"
-            >
-              ⟲
-            </Button>
-            <Button variant="subtle" size="md" onClick={toggle} className="w-24">
-              {playing ? 'Pause' : 'Play'}
-            </Button>
-            <span className="text-[13px] tabular-nums text-white/50 w-28">
-              {fmt(outputTime)} / {fmt(total)}
-            </span>
-            <div className="flex-1" />
-            <div className="hidden md:block text-[11px] text-white/35">
-              Click a clip to select · Split at the playhead · drag a selected clip's ends to trim
+          {/* Transport — replaced by the crop toolbar while cropping */}
+          {draftCrop ? (
+            <div className="flex items-center gap-3">
+              <span className="text-[13px] text-white/70">
+                Drag the box to choose the area to keep
+              </span>
+              <span className="text-[12px] tabular-nums text-white/40">
+                {source
+                  ? `${Math.round(draftCrop.w * source.w)}×${Math.round(
+                      draftCrop.h * source.h
+                    )}`
+                  : ''}
+              </span>
+              <div className="flex-1" />
+              <Button variant="ghost" size="sm" onClick={() => setDraftCrop(null)}>
+                Cancel
+              </Button>
+              <Button variant="primary" size="sm" onClick={applyCrop}>
+                Apply crop
+              </Button>
             </div>
-          </div>
+          ) : (
+            <div className="flex items-center gap-4">
+              <Button
+                variant="ghost"
+                size="md"
+                aria-label="Restart"
+                onClick={() => seek(0)}
+                className="w-11"
+              >
+                ⟲
+              </Button>
+              <Button variant="subtle" size="md" onClick={toggle} className="w-24">
+                {playing ? 'Pause' : 'Play'}
+              </Button>
+              <span className="text-[13px] tabular-nums text-white/50 w-28">
+                {fmt(outputTime)} / {fmt(total)}
+              </span>
+              <div className="flex-1" />
+              <div className="hidden md:block text-[11px] text-white/35">
+                Click a clip to select · Split at the playhead · drag a clip's ends to trim
+              </div>
+            </div>
+          )}
 
           {/* Timeline */}
           <Timeline
@@ -382,6 +472,8 @@ export default function Editor(): JSX.Element {
             onSelectZoom={setSelectedZoom}
             onAddZoom={() => setZoomArm('new')}
             onRefocusZoom={(id) => setZoomArm(id)}
+            onCropStart={beginCrop}
+            onCropReset={resetCrop}
           />
         </aside>
       </div>
@@ -394,6 +486,20 @@ export default function Editor(): JSX.Element {
         className="hidden"
         preload="auto"
         playsInline
+        onLoadedMetadata={() => {
+          const v = screenRef.current
+          if (!v || !v.videoWidth) return
+          setSource({ w: v.videoWidth, h: v.videoHeight })
+          // Match the output to the recording's own shape (screens aren't always
+          // 16:9 — a 16:10 Mac display would otherwise get cover-cropped).
+          const out = outputSizeFor(v.videoWidth, v.videoHeight, project.crop)
+          if (out.width !== project.outputWidth || out.height !== project.outputHeight) {
+            updateProject((p) => {
+              p.outputWidth = out.width
+              p.outputHeight = out.height
+            })
+          }
+        }}
         onLoadedData={() => primeFrame(screenRef.current)}
       />
       {project.cameraSrc && (
@@ -444,7 +550,7 @@ export default function Editor(): JSX.Element {
                     </p>
                   </div>
                 ) : savedPath ? (
-                  <div className="space-y-4">
+                  <div className="space-y-3">
                     <p className="text-sm text-emerald-300">Saved successfully.</p>
                     <div className="flex gap-2">
                       <Button
@@ -462,6 +568,16 @@ export default function Editor(): JSX.Element {
                         Done
                       </Button>
                     </div>
+                    <Button
+                      variant="primary"
+                      className="w-full"
+                      onClick={() => {
+                        setSavedPath(null)
+                        setExportError(null)
+                      }}
+                    >
+                      Export again
+                    </Button>
                   </div>
                 ) : (
                   <div className="space-y-3">
