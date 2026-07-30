@@ -8,6 +8,7 @@ import { deleteClip, outputSizeFor, splitAt, totalDuration, trimClip } from '../
 import { uid } from '../lib/uid'
 import { usePlayback } from './usePlayback'
 import { exportProject } from './export'
+import { renderOffline, webCodecsAvailable } from './exportOffline'
 import Timeline from './Timeline'
 import Inspector from './Inspector'
 
@@ -43,6 +44,7 @@ export default function Editor(): JSX.Element {
 
   const [exporting, setExporting] = useState(false)
   const [progress, setProgress] = useState(0)
+  const [stage, setStage] = useState('Rendering')
   const [showExport, setShowExport] = useState(false)
   const [savedPath, setSavedPath] = useState<string | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
@@ -249,17 +251,41 @@ export default function Editor(): JSX.Element {
     setProgress(0)
     setSavedPath(null)
     setExportError(null)
+    await window.ledger.export.keepAwake(true).catch(() => {})
     try {
-      const blob = await exportProject(project, { onProgress: setProgress })
-      const buf = await blob.arrayBuffer()
-      const suggested = `recording.${format}`
-      const res = await window.ledger.export.save(buf, format, suggested)
-      if (!res.canceled && res.filePath) setSavedPath(res.filePath)
+      if (webCodecsAvailable()) {
+        // Frame-exact offline render: immune to stalls, focus changes and
+        // throttling, which is what used to freeze the picture.
+        let audioWarning: string | null = null
+        const media = await renderOffline(project, {
+          onProgress: (f, label) => {
+            setProgress(f)
+            setStage(label)
+          },
+          onAudioIssue: (reason) => {
+            audioWarning = reason
+          }
+        })
+        if (audioWarning) setExportError(`Exported without audio (${audioWarning}).`)
+        const res = await window.ledger.export.saveRendered(
+          media.h264,
+          media.wav,
+          media.fps,
+          'recording.mp4'
+        )
+        if (!res.canceled && res.filePath) setSavedPath(res.filePath)
+      } else {
+        const blob = await exportProject(project, { onProgress: setProgress })
+        const buf = await blob.arrayBuffer()
+        const res = await window.ledger.export.save(buf, format, `recording.${format}`)
+        if (!res.canceled && res.filePath) setSavedPath(res.filePath)
+      }
     } catch (e) {
       console.error(e)
       setExportError(String(e))
     } finally {
       setExporting(false)
+      await window.ledger.export.keepAwake(false).catch(() => {})
     }
   }
 
@@ -546,7 +572,10 @@ export default function Editor(): JSX.Element {
                       />
                     </div>
                     <p className="text-[13px] text-white/50 text-center tabular-nums">
-                      Rendering… {Math.round(progress * 100)}%
+                      {stage}… {Math.round(progress * 100)}%
+                    </p>
+                    <p className="text-[11px] text-white/35 text-center">
+                      You can switch to other apps — this renders frame by frame.
                     </p>
                   </div>
                 ) : savedPath ? (

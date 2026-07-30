@@ -56,7 +56,13 @@ export async function exportProject(project: Project, opts: ExportOpts = {}): Pr
   const screen = await makeVideo(project.screenSrc, false)
   const camera = project.cameraSrc ? await makeVideo(project.cameraSrc, true) : null
 
-  const videoStream = canvas.captureStream(fps)
+  // frameRate 0 = we push every frame ourselves via requestFrame(). With the
+  // automatic mode the browser re-captures whatever is on the canvas on its own
+  // schedule, so a stalled draw loop silently records a frozen frame.
+  const videoStream = canvas.captureStream(0)
+  const canvasTrack = videoStream.getVideoTracks()[0] as MediaStreamTrack & {
+    requestFrame?: () => void
+  }
 
   // Route the screen element's audio (which holds the mic track) into the
   // recording via Web Audio, connected ONLY to a stream destination — never to
@@ -94,19 +100,23 @@ export async function exportProject(project: Project, opts: ExportOpts = {}): Pr
     await screen.play().catch(() => {})
     camera?.play().catch(() => {})
     await new Promise<void>((resolve) => {
-      const step = (): void => {
+      // Driven by setInterval rather than requestAnimationFrame: rAF is tied to
+      // the display refresh and stops when the window isn't visible, which froze
+      // exports the moment the user switched apps. Timers keep running (the
+      // window also sets backgroundThrottling: false).
+      const period = 1000 / fps
+      const timer = setInterval(() => {
         const t = screen.currentTime
         if (camera && Math.abs(camera.currentTime - t) > 0.2) camera.currentTime = t
         renderFrame(ctx, project, t, screen, camera)
+        canvasTrack.requestFrame?.() // push exactly this frame to the recorder
         const outT = outAcc + Math.max(0, t - clip.inPoint)
         opts.onProgress?.(total > 0 ? Math.min(1, outT / total) : 1)
-        if (t >= clip.outPoint - 1 / fps) {
+        if (t >= clip.outPoint - 1 / fps || screen.ended) {
+          clearInterval(timer)
           resolve()
-          return
         }
-        requestAnimationFrame(step)
-      }
-      requestAnimationFrame(step)
+      }, period)
     })
     screen.pause()
     camera?.pause()

@@ -26,7 +26,20 @@ const api = {
     newSession: (): Promise<{ id: string; dir: string }> =>
       ipcRenderer.invoke('recordings:newSession'),
     saveTrack: (dir: string, name: string, data: ArrayBuffer): Promise<string> =>
-      ipcRenderer.invoke('recordings:saveTrack', dir, name, data)
+      ipcRenderer.invoke('recordings:saveTrack', dir, name, data),
+    list: (): Promise<
+      {
+        id: string
+        dir: string
+        screenPath: string
+        cameraPath: string | null
+        size: number
+        modified: number
+      }[]
+    > => ipcRenderer.invoke('recordings:list'),
+    read: (filePath: string): Promise<ArrayBuffer> =>
+      ipcRenderer.invoke('recordings:read', filePath),
+    reveal: (): Promise<void> => ipcRenderer.invoke('recordings:reveal')
   },
   bubble: {
     open: (deviceId: string): Promise<void> => ipcRenderer.invoke('bubble:open', deviceId),
@@ -39,7 +52,15 @@ const api = {
       suggested: string
     ): Promise<{ canceled: boolean; filePath?: string }> =>
       ipcRenderer.invoke('export:save', data, format, suggested),
-    showItem: (filePath: string): Promise<void> => ipcRenderer.invoke('shell:showItem', filePath)
+    saveRendered: (
+      h264: ArrayBuffer,
+      wav: ArrayBuffer | null,
+      fps: number,
+      suggested: string
+    ): Promise<{ canceled: boolean; filePath?: string }> =>
+      ipcRenderer.invoke('export:saveRendered', h264, wav, fps, suggested),
+    showItem: (filePath: string): Promise<void> => ipcRenderer.invoke('shell:showItem', filePath),
+    keepAwake: (on: boolean): Promise<void> => ipcRenderer.invoke('power:keepAwake', on)
   }
 }
 

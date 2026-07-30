@@ -68,7 +68,7 @@ export function useCapture() {
       cameraSrc = URL.createObjectURL(cameraBlob)
     }
 
-    // Persist raw tracks to disk (best-effort) for durability.
+    // Persist BOTH raw tracks to disk so a recording is never only in memory.
     try {
       const session = await window.ledger.recordings.newSession()
       await window.ledger.recordings.saveTrack(
@@ -76,6 +76,14 @@ export function useCapture() {
         'screen.webm',
         await screenBlob.arrayBuffer()
       )
+      if (cameraChunks.current.length) {
+        const cameraBlob = new Blob(cameraChunks.current, { type: mime })
+        await window.ledger.recordings.saveTrack(
+          session.dir,
+          'camera.webm',
+          await cameraBlob.arrayBuffer()
+        )
+      }
     } catch (e) {
       console.warn('persist failed', e)
     }

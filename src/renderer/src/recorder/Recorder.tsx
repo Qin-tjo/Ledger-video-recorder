@@ -10,6 +10,44 @@ interface Device {
   label: string
 }
 
+interface PastRecording {
+  id: string
+  dir: string
+  screenPath: string
+  cameraPath: string | null
+  size: number
+  modified: number
+}
+
+/** Load a saved session back into the editor. */
+async function openPast(
+  rec: PastRecording,
+  openEditor: (r: { screenSrc: string; cameraSrc: string | null; duration: number }) => void
+): Promise<void> {
+  const toUrl = async (p: string): Promise<string> => {
+    const buf = await window.ledger.recordings.read(p)
+    return URL.createObjectURL(new Blob([buf], { type: 'video/webm' }))
+  }
+  const screenSrc = await toUrl(rec.screenPath)
+  const cameraSrc = rec.cameraPath ? await toUrl(rec.cameraPath) : null
+  const duration = await new Promise<number>((resolve) => {
+    const v = document.createElement('video')
+    v.preload = 'metadata'
+    v.src = screenSrc
+    v.onloadedmetadata = () => {
+      if (v.duration === Infinity || isNaN(v.duration)) {
+        v.currentTime = 1e101
+        v.ontimeupdate = () => {
+          v.ontimeupdate = null
+          resolve(v.duration)
+        }
+      } else resolve(v.duration)
+    }
+    v.onerror = () => resolve(0)
+  })
+  openEditor({ screenSrc, cameraSrc, duration })
+}
+
 export default function Recorder(): JSX.Element {
   const openEditor = useApp((s) => s.openEditor)
   const { status, countdown, elapsed, start, stop } = useCapture()
@@ -22,6 +60,7 @@ export default function Recorder(): JSX.Element {
   const [micId, setMicId] = useState<string | null>(null)
   const [screenPerm, setScreenPerm] = useState<string>('unknown')
   const [error, setError] = useState<string | null>(null)
+  const [past, setPast] = useState<PastRecording[]>([])
 
   const previewRef = useRef<HTMLVideoElement>(null)
   const previewStream = useRef<MediaStream | null>(null)
@@ -54,6 +93,7 @@ export default function Recorder(): JSX.Element {
       setMics(microphones)
       if (cameraId === null && cams.length) setCameraId(cams[0].deviceId)
       if (micId === null && microphones.length) setMicId(microphones[0].deviceId)
+      setPast(await window.ledger.recordings.list().catch(() => []))
     } catch (e) {
       setError(String(e))
     }
@@ -247,6 +287,45 @@ export default function Recorder(): JSX.Element {
             </div>
           )}
         </div>
+
+        {/* Past recordings — every session is saved to disk, so nothing is lost
+            if you close the app or start a new recording. */}
+        {!recording && past.length > 0 && (
+          <Panel className="mt-8 p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold text-white/80">Past recordings</h2>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => window.ledger.recordings.reveal()}
+              >
+                Show folder
+              </Button>
+            </div>
+            <div className="space-y-1 max-h-[240px] overflow-y-auto">
+              {past.map((r) => (
+                <button
+                  key={r.id}
+                  onClick={() => openPast(r, openEditor)}
+                  className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left hover:bg-white/[0.06] transition-colors group"
+                >
+                  <span className="text-white/30 group-hover:text-accent">▸</span>
+                  <span className="flex-1 text-[13px] text-white/80">
+                    {new Date(r.modified).toLocaleString()}
+                  </span>
+                  {r.cameraPath && (
+                    <span className="text-[10px] text-white/40 px-1.5 py-0.5 rounded bg-white/[0.06]">
+                      camera
+                    </span>
+                  )}
+                  <span className="text-[11px] tabular-nums text-white/35">
+                    {(r.size / 1024 / 1024).toFixed(1)} MB
+                  </span>
+                </button>
+              ))}
+            </div>
+          </Panel>
+        )}
       </div>
     </div>
   )

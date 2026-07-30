@@ -1,8 +1,16 @@
-import { app, shell, BrowserWindow, ipcMain, systemPreferences, dialog } from 'electron'
+import {
+  app,
+  shell,
+  BrowserWindow,
+  ipcMain,
+  systemPreferences,
+  dialog,
+  powerSaveBlocker
+} from 'electron'
 import { join, basename, resolve, sep } from 'path'
 import { promises as fs } from 'fs'
 import { registerRecordingHandlers, createBubbleWindow } from './recording'
-import { transcodeToMp4 } from './ffmpeg'
+import { muxToMp4, transcodeToMp4 } from './ffmpeg'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -30,7 +38,11 @@ function createMainWindow(): void {
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: true
+      webSecurity: true,
+      // Export composites frames on a timer in the renderer. Chromium normally
+      // throttles timers and rAF once a window isn't frontmost, which froze the
+      // picture whenever the user switched apps mid-export. Keep us running.
+      backgroundThrottling: false
     }
   })
 
@@ -108,6 +120,66 @@ ipcMain.handle(
   }
 )
 
+/** Past sessions on disk, newest first, so a recording is never stranded. */
+ipcMain.handle('recordings:list', async () => {
+  const root = recordingsRoot()
+  let entries: string[] = []
+  try {
+    entries = await fs.readdir(root)
+  } catch {
+    return []
+  }
+  const out: {
+    id: string
+    dir: string
+    screenPath: string
+    cameraPath: string | null
+    size: number
+    modified: number
+  }[] = []
+  for (const id of entries) {
+    const dir = join(root, id)
+    const screenPath = join(dir, 'screen.webm')
+    try {
+      const st = await fs.stat(screenPath)
+      if (!st.isFile() || st.size === 0) continue
+      let cameraPath: string | null = join(dir, 'camera.webm')
+      try {
+        await fs.access(cameraPath)
+      } catch {
+        cameraPath = null
+      }
+      out.push({
+        id,
+        dir,
+        screenPath,
+        cameraPath,
+        size: st.size,
+        modified: st.mtimeMs
+      })
+    } catch {
+      // not a session dir
+    }
+  }
+  out.sort((a, b) => b.modified - a.modified)
+  return out
+})
+
+ipcMain.handle('recordings:read', async (_e, filePath: string) => {
+  // Only ever read back from inside the recordings folder.
+  const root = resolve(recordingsRoot())
+  const p = resolve(filePath)
+  if (p !== root && !p.startsWith(root + sep)) throw new Error('Invalid path')
+  const buf = await fs.readFile(p)
+  return new Uint8Array(buf).buffer
+})
+
+ipcMain.handle('recordings:reveal', async () => {
+  const root = recordingsRoot()
+  await fs.mkdir(root, { recursive: true })
+  shell.openPath(root)
+})
+
 // ---- Export ----
 ipcMain.handle(
   'export:save',
@@ -131,8 +203,49 @@ ipcMain.handle(
   }
 )
 
+/** Save a frame-exact render: mux the H.264 + WAV the renderer produced. */
+ipcMain.handle(
+  'export:saveRendered',
+  async (_e, h264: ArrayBuffer, wav: ArrayBuffer | null, fps: number, suggested: string) => {
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow!, {
+      title: 'Save recording',
+      defaultPath: suggested,
+      filters: [{ name: 'MP4', extensions: ['mp4'] }]
+    })
+    if (canceled || !filePath) return { canceled: true }
+
+    const stamp = Date.now()
+    const vPath = join(app.getPath('temp'), `lvr-${stamp}.h264`)
+    const aPath = wav ? join(app.getPath('temp'), `lvr-${stamp}.wav`) : null
+    try {
+      await fs.writeFile(vPath, Buffer.from(h264))
+      if (aPath && wav) await fs.writeFile(aPath, Buffer.from(wav))
+      await muxToMp4(vPath, aPath, fps, filePath)
+    } finally {
+      await fs.unlink(vPath).catch(() => {})
+      if (aPath) await fs.unlink(aPath).catch(() => {})
+    }
+    return { canceled: false, filePath }
+  }
+)
+
 ipcMain.handle('shell:showItem', async (_e, filePath: string) => {
   shell.showItemInFolder(filePath)
+})
+
+// ---- Keep the machine awake while exporting ----
+// Export renders in real time; if the display sleeps the compositing stalls and
+// the output freezes. Hold a blocker for the duration.
+let exportBlockerId: number | null = null
+ipcMain.handle('power:keepAwake', async (_e, on: boolean) => {
+  if (on) {
+    if (exportBlockerId === null) {
+      exportBlockerId = powerSaveBlocker.start('prevent-display-sleep')
+    }
+  } else if (exportBlockerId !== null) {
+    if (powerSaveBlocker.isStarted(exportBlockerId)) powerSaveBlocker.stop(exportBlockerId)
+    exportBlockerId = null
+  }
 })
 
 // ---- Camera bubble window ----
