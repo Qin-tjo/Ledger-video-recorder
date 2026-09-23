@@ -5,6 +5,8 @@ import { makeClips } from './lib/composite'
 export interface Recording {
   screenSrc: string
   cameraSrc: string | null
+  screenPath?: string | null
+  cameraPath?: string | null
   duration: number
 }
 
@@ -39,6 +41,8 @@ export const useApp = create<AppState>((set) => ({
       const p = defaultProject()
       p.screenSrc = rec.screenSrc
       p.cameraSrc = rec.cameraSrc
+      p.screenPath = rec.screenPath ?? null
+      p.cameraPath = rec.cameraPath ?? null
       p.camera.enabled = !!rec.cameraSrc
       p.duration = rec.duration
       p.clips = makeClips(rec.duration)

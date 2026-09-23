@@ -22,7 +22,13 @@ interface PastRecording {
 /** Load a saved session back into the editor. */
 async function openPast(
   rec: PastRecording,
-  openEditor: (r: { screenSrc: string; cameraSrc: string | null; duration: number }) => void
+  openEditor: (r: {
+    screenSrc: string
+    cameraSrc: string | null
+    screenPath: string | null
+    cameraPath: string | null
+    duration: number
+  }) => void
 ): Promise<void> {
   const toUrl = async (p: string): Promise<string> => {
     const buf = await window.ledger.recordings.read(p)
@@ -45,7 +51,13 @@ async function openPast(
     }
     v.onerror = () => resolve(0)
   })
-  openEditor({ screenSrc, cameraSrc, duration })
+  openEditor({
+    screenSrc,
+    cameraSrc,
+    screenPath: rec.screenPath,
+    cameraPath: rec.cameraPath,
+    duration
+  })
 }
 
 export default function Recorder(): JSX.Element {

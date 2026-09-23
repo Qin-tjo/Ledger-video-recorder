@@ -1,5 +1,12 @@
 import type { Project } from '../lib/types'
-import { clipDur, renderFrame, resetAutoGain, totalDuration } from '../lib/composite'
+import {
+  bitmapSource,
+  clipDur,
+  renderFrame,
+  resetAutoGain,
+  totalDuration,
+  videoSource
+} from '../lib/composite'
 
 /**
  * Deterministic, offline export.
@@ -132,7 +139,7 @@ export async function renderOffline(
     await seekTo(screen, srcT)
     if (camera) await seekTo(camera, srcT)
 
-    renderFrame(ctx, project, srcT, screen, camera)
+    renderFrame(ctx, project, srcT, videoSource(screen), camera ? videoSource(camera) : null)
 
     const frame = new VideoFrame(canvas, {
       timestamp: Math.round(i * frameDurUs),
@@ -258,4 +265,224 @@ function encodeWav(channels: Float32Array[], sampleRate: number): ArrayBuffer {
     }
   }
   return buffer
+}
+
+
+// ---------------------------------------------------------------------------
+// Fast path: decode with ffmpeg, stream the encode to disk.
+//
+// Seeking an HTMLVideoElement costs ~100ms per frame in Chromium no matter the
+// codec — that's fixed pipeline overhead, not decode (ffmpeg reads the same
+// recording at ~1000fps). So a 8-minute export spent ~25 minutes seeking. Here
+// frames are pulled from ffmpeg sequentially in chunks instead, and the encoded
+// H.264 is written straight to a temp file rather than accumulated in renderer
+// memory — holding ~1GB of chunks was what made the VideoEncoder die mid-export
+// with "Cannot call 'encode' on a closed codec".
+// ---------------------------------------------------------------------------
+
+/** Frames per ffmpeg call. Big enough to amortize process startup, small
+ * enough that one chunk of JPEGs is a modest buffer. */
+const CHUNK_FRAMES = 120
+
+/** Split concatenated JPEGs (ffmpeg image2pipe output) into individual blobs. */
+function splitJpegs(buf: Uint8Array): Uint8Array[] {
+  const out: Uint8Array[] = []
+  let start = -1
+  for (let i = 0; i + 1 < buf.length; i++) {
+    if (buf[i] !== 0xff) continue
+    if (buf[i + 1] === 0xd8 && start === -1) {
+      start = i
+    } else if (buf[i + 1] === 0xd9 && start !== -1) {
+      out.push(buf.subarray(start, i + 2))
+      start = -1
+    }
+  }
+  return out
+}
+
+async function decodeChunk(
+  path: string,
+  startSec: number,
+  count: number,
+  fps: number
+): Promise<ImageBitmap[]> {
+  const raw = await window.ledger.export.extractFrames(path, startSec, count, fps)
+  const jpegs = splitJpegs(new Uint8Array(raw))
+  return Promise.all(
+    jpegs.map((j) => createImageBitmap(new Blob([j as BlobPart], { type: 'image/jpeg' })))
+  )
+}
+
+/** One entry per output frame: which clip it's in and its source time. */
+function framePlan(project: Project, fps: number): { srcT: number }[] {
+  const plan: { srcT: number }[] = []
+  for (const c of project.clips) {
+    const n = Math.max(1, Math.round(clipDur(c) * fps))
+    for (let i = 0; i < n; i++) plan.push({ srcT: c.inPoint + i / fps })
+  }
+  return plan
+}
+
+export function fastPathAvailable(project: Project): boolean {
+  return webCodecsAvailable() && !!project.screenPath
+}
+
+/**
+ * Render and save in one pass. Returns the same shape as the save dialog so the
+ * caller can report where the file went.
+ */
+export async function renderAndSave(
+  project: Project,
+  suggested: string,
+  opts: OfflineOpts = {}
+): Promise<{ canceled: boolean; filePath?: string }> {
+  const fps = opts.fps ?? 30
+  const screenPath = project.screenPath!
+  const cameraPath = project.camera.enabled ? project.cameraPath : null
+
+  const canvas = document.createElement('canvas')
+  canvas.width = project.outputWidth
+  canvas.height = project.outputHeight
+  const ctx = canvas.getContext('2d', { alpha: false })!
+
+  const plan = framePlan(project, fps)
+  const frameCount = plan.length
+  const streamId = await window.ledger.export.streamBegin()
+
+  const VE = (window as never as { VideoEncoder: typeof VideoEncoder }).VideoEncoder
+  let encodeError: Error | null = null
+  const writes: Promise<void>[] = []
+  const encoder = new VE({
+    output: (chunk: EncodedVideoChunk) => {
+      const buf = new Uint8Array(chunk.byteLength)
+      chunk.copyTo(buf)
+      writes.push(
+        window.ledger.export.streamWrite(streamId, buf.buffer).catch((e) => {
+          encodeError = encodeError ?? (e as Error)
+        })
+      )
+    },
+    error: (e: Error) => {
+      encodeError = encodeError ?? e
+    }
+  })
+  encoder.configure({
+    codec: 'avc1.4d0028',
+    width: project.outputWidth,
+    height: project.outputHeight,
+    bitrate: 8_000_000,
+    framerate: fps,
+    avc: { format: 'annexb' },
+    hardwareAcceleration: 'prefer-hardware'
+  })
+
+  resetAutoGain()
+  const frameDurUs = 1_000_000 / fps
+
+  // How many frames the chunk starting at `i` covers: up to CHUNK_FRAMES, but
+  // never across a cut, so ffmpeg only ever decodes one contiguous span.
+  const chunkLen = (i: number): number => {
+    const startT = plan[i].srcT
+    let n = 1
+    while (
+      n < CHUNK_FRAMES &&
+      i + n < frameCount &&
+      Math.abs(plan[i + n].srcT - (startT + n / fps)) < 1e-6
+    ) {
+      n++
+    }
+    return n
+  }
+
+  const fetchChunk = (i: number, n: number): Promise<[ImageBitmap[], ImageBitmap[]]> =>
+    Promise.all([
+      decodeChunk(screenPath, plan[i].srcT, n, fps),
+      cameraPath ? decodeChunk(cameraPath, plan[i].srcT, n, fps) : Promise.resolve([])
+    ])
+
+  try {
+    let i = 0
+    let n = chunkLen(0)
+    // Decoding and encoding are both ~realtime-bound, so keep one chunk in
+    // flight while the previous one encodes.
+    let pending: Promise<[ImageBitmap[], ImageBitmap[]]> | null = fetchChunk(0, n)
+
+    while (i < frameCount) {
+      if (opts.signal?.cancelled) {
+        pending?.catch(() => {})
+        await window.ledger.export.streamAbort(streamId)
+        encoder.close()
+        return { canceled: true }
+      }
+
+      const [screens, cams] = await pending!
+      if (!screens.length) throw new Error('the recording could not be decoded')
+
+      const nextI = i + n
+      const nextN = nextI < frameCount ? chunkLen(nextI) : 0
+      pending = nextN ? fetchChunk(nextI, nextN) : null
+
+      for (let k = 0; k < n; k++) {
+        // ffmpeg can return a frame or two short at the tail of a span; hold
+        // the last decoded frame rather than dropping output frames.
+        const sBmp = screens[Math.min(k, screens.length - 1)]
+        const cBmp = cams.length ? cams[Math.min(k, cams.length - 1)] : null
+
+        renderFrame(
+          ctx,
+          project,
+          plan[i + k].srcT,
+          bitmapSource(sBmp),
+          cBmp ? bitmapSource(cBmp) : null
+        )
+
+        if (encodeError) throw encodeError
+        if (encoder.state !== 'configured') {
+          throw new Error('the video encoder stopped unexpectedly')
+        }
+
+        const frame = new VideoFrame(canvas, {
+          timestamp: Math.round((i + k) * frameDurUs),
+          duration: Math.round(frameDurUs)
+        })
+        encoder.encode(frame, { keyFrame: (i + k) % (fps * 2) === 0 })
+        frame.close()
+
+        while (encoder.encodeQueueSize > 8 && !encodeError) {
+          await new Promise((r) => setTimeout(r, 2))
+        }
+      }
+
+      for (const b of screens) b.close()
+      for (const b of cams) b.close()
+
+      i = nextI
+      n = nextN
+      opts.onProgress?.((i / frameCount) * 0.9, 'Rendering video')
+    }
+
+    await encoder.flush()
+    encoder.close()
+    await Promise.all(writes)
+    if (encodeError) throw encodeError
+
+    opts.onProgress?.(0.92, 'Rendering audio')
+    let wav: ArrayBuffer | null = null
+    let audioError: string | null = null
+    try {
+      wav = await renderAudio(project)
+      if (!wav) audioError = 'no audio track in the recording'
+    } catch (e) {
+      audioError = String(e)
+      console.error('audio render failed', e)
+    }
+    if (audioError) opts.onAudioIssue?.(audioError)
+
+    opts.onProgress?.(0.96, 'Writing file')
+    return await window.ledger.export.streamFinish(streamId, wav, fps, suggested)
+  } catch (e) {
+    if (encoder.state !== 'closed') encoder.close()
+    await window.ledger.export.streamAbort(streamId).catch(() => {})
+    throw e
+  }
 }

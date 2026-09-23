@@ -1,5 +1,11 @@
 import type { Project } from '../lib/types'
-import { clipDur, renderFrame, resetAutoGain, totalDuration } from '../lib/composite'
+import {
+  clipDur,
+  renderFrame,
+  resetAutoGain,
+  totalDuration,
+  videoSource
+} from '../lib/composite'
 
 interface ExportOpts {
   fps?: number
@@ -108,7 +114,7 @@ export async function exportProject(project: Project, opts: ExportOpts = {}): Pr
       const timer = setInterval(() => {
         const t = screen.currentTime
         if (camera && Math.abs(camera.currentTime - t) > 0.2) camera.currentTime = t
-        renderFrame(ctx, project, t, screen, camera)
+        renderFrame(ctx, project, t, videoSource(screen), camera ? videoSource(camera) : null)
         canvasTrack.requestFrame?.() // push exactly this frame to the recorder
         const outT = outAcc + Math.max(0, t - clip.inPoint)
         opts.onProgress?.(total > 0 ? Math.min(1, outT / total) : 1)

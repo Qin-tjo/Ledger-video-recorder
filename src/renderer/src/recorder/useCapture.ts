@@ -9,6 +9,9 @@ interface CaptureConfig {
 interface CaptureResult {
   screenSrc: string
   cameraSrc: string | null
+  /** Where the raw tracks landed on disk; export decodes from these. */
+  screenPath: string | null
+  cameraPath: string | null
   duration: number
 }
 
@@ -17,8 +20,11 @@ async function getScreenStream(sourceId: string, mic: MediaStreamTrack | null): 
   // getDisplayMedia (ScreenCaptureKit on macOS) honors setContentProtection, so the
   // floating camera bubble is excluded from the recording.
   await window.ledger.sources.select(sourceId)
+  // Cap at 1080p: a Retina display captures at ~2940x1678, which is far more
+  // than the 1080p output ever uses and makes every stage (write, decode,
+  // export) several times slower for no visible gain.
   const stream = await navigator.mediaDevices.getDisplayMedia({
-    video: { frameRate: 30 },
+    video: { frameRate: 30, width: { max: 1920 }, height: { max: 1080 } },
     audio: false
   })
   if (mic) stream.addTrack(mic)
@@ -69,16 +75,18 @@ export function useCapture() {
     }
 
     // Persist BOTH raw tracks to disk so a recording is never only in memory.
+    let screenPath: string | null = null
+    let cameraPath: string | null = null
     try {
       const session = await window.ledger.recordings.newSession()
-      await window.ledger.recordings.saveTrack(
+      screenPath = await window.ledger.recordings.saveTrack(
         session.dir,
         'screen.webm',
         await screenBlob.arrayBuffer()
       )
       if (cameraChunks.current.length) {
         const cameraBlob = new Blob(cameraChunks.current, { type: mime })
-        await window.ledger.recordings.saveTrack(
+        cameraPath = await window.ledger.recordings.saveTrack(
           session.dir,
           'camera.webm',
           await cameraBlob.arrayBuffer()
@@ -92,7 +100,7 @@ export function useCapture() {
     cleanup()
     setStatus('idle')
     setElapsed(0)
-    resolver.current?.({ screenSrc, cameraSrc, duration })
+    resolver.current?.({ screenSrc, cameraSrc, screenPath, cameraPath, duration })
     resolver.current = null
   }, [cleanup])
 

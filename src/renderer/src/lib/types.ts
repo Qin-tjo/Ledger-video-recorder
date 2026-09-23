@@ -66,6 +66,10 @@ export interface CropRect {
 export interface Project {
   screenSrc: string // blob/file url
   cameraSrc: string | null
+  /** On-disk sources, when known. Export decodes from these with ffmpeg, which
+   * is far faster than seeking a <video> and always returns the exact frames. */
+  screenPath: string | null
+  cameraPath: string | null
   duration: number // seconds (source)
   clips: Clip[]
   /** null = use the whole screen recording. */
@@ -80,6 +84,8 @@ export interface Project {
 export const defaultProject = (): Project => ({
   screenSrc: '',
   cameraSrc: null,
+  screenPath: null,
+  cameraPath: null,
   duration: 0,
   clips: [],
   crop: null,

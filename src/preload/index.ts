@@ -52,6 +52,24 @@ const api = {
       suggested: string
     ): Promise<{ canceled: boolean; filePath?: string }> =>
       ipcRenderer.invoke('export:save', data, format, suggested),
+    extractFrames: (
+      src: string,
+      startSec: number,
+      count: number,
+      fps: number
+    ): Promise<ArrayBuffer> =>
+      ipcRenderer.invoke('export:extractFrames', src, startSec, count, fps),
+    streamBegin: (): Promise<string> => ipcRenderer.invoke('export:streamBegin'),
+    streamWrite: (id: string, data: ArrayBuffer): Promise<void> =>
+      ipcRenderer.invoke('export:streamWrite', id, data),
+    streamAbort: (id: string): Promise<void> => ipcRenderer.invoke('export:streamAbort', id),
+    streamFinish: (
+      id: string,
+      wav: ArrayBuffer | null,
+      fps: number,
+      suggested: string
+    ): Promise<{ canceled: boolean; filePath?: string }> =>
+      ipcRenderer.invoke('export:streamFinish', id, wav, fps, suggested),
     saveRendered: (
       h264: ArrayBuffer,
       wav: ArrayBuffer | null,

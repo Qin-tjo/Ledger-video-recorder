@@ -172,8 +172,8 @@ export function renderFrame(
   ctx: CanvasRenderingContext2D,
   p: Project,
   sourceTime: number,
-  screenVideo: HTMLVideoElement,
-  cameraVideo: HTMLVideoElement | null
+  screenVideo: FrameSource | null,
+  cameraVideo: FrameSource | null
 ): void {
   const W = p.outputWidth
   const H = p.outputHeight
@@ -206,10 +206,10 @@ export function renderFrame(
     ctx.clip()
   }
 
-  if (screenVideo.videoWidth > 0) {
+  if (screenVideo && screenVideo.width > 0) {
     // Source region: the crop if one is set, otherwise the whole frame.
-    const vw = screenVideo.videoWidth
-    const vh = screenVideo.videoHeight
+    const vw = screenVideo.width
+    const vh = screenVideo.height
     const c = p.crop
     const sx = c ? c.x * vw : 0
     const sy = c ? c.y * vh : 0
@@ -228,12 +228,12 @@ export function renderFrame(
     // clamp so we never show empty edges
     dx = Math.min(rect.x, Math.max(rect.x + rect.w - dw, dx))
     dy = Math.min(rect.y, Math.max(rect.y + rect.h - dh, dy))
-    ctx.drawImage(screenVideo, sx, sy, sw, sh, dx, dy, dw, dh)
+    ctx.drawImage(screenVideo.drawable, sx, sy, sw, sh, dx, dy, dw, dh)
   }
   ctx.restore()
 
   // 3. Camera bubble
-  if (p.camera.enabled && cameraVideo && cameraVideo.videoWidth > 0) {
+  if (p.camera.enabled && cameraVideo && cameraVideo.width > 0) {
     drawCamera(ctx, p, cameraVideo, W, H)
   }
 }
@@ -260,6 +260,29 @@ export function outputSizeFor(
   return { width: even(w * scale), height: even(h * scale) }
 }
 
+// Frame sources -----------------------------------------------------------
+// The compositor draws from either a live <video> (preview) or a decoded still
+// (export). Carrying dimensions alongside the drawable lets both share one
+// render path, so preview and export stay pixel-identical.
+
+export interface FrameSource {
+  readonly drawable: CanvasImageSource
+  readonly width: number
+  readonly height: number
+}
+
+export const videoSource = (v: HTMLVideoElement): FrameSource => ({
+  drawable: v,
+  width: v.videoWidth,
+  height: v.videoHeight
+})
+
+export const bitmapSource = (b: ImageBitmap): FrameSource => ({
+  drawable: b,
+  width: b.width,
+  height: b.height
+})
+
 // Studio look -------------------------------------------------------------
 // Auto-exposure: periodically measure the camera frame's mean luminance on a
 // tiny offscreen canvas and derive a gain that pulls it toward a flattering
@@ -285,9 +308,9 @@ let fillLight = 0
  * care where the face is: if a meaningful part of the picture is too dark, it
  * lifts, and the `screen` blend it drives leaves the highlights alone.
  */
-export function cameraFillLight(cam: HTMLVideoElement): number {
+export function cameraFillLight(cam: FrameSource): number {
   const now = typeof performance !== 'undefined' ? performance.now() : 0
-  if (now - lastSampleAt < 350 || cam.videoWidth === 0) return fillLight
+  if (now - lastSampleAt < 350 || cam.width === 0) return fillLight
   lastSampleAt = now
 
   if (!lumaCanvas) {
@@ -299,7 +322,7 @@ export function cameraFillLight(cam: HTMLVideoElement): number {
   if (!lumaCtx) return fillLight
 
   try {
-    lumaCtx.drawImage(cam, 0, 0, LUMA_W, LUMA_H)
+    lumaCtx.drawImage(cam.drawable, 0, 0, LUMA_W, LUMA_H)
     const d = lumaCtx.getImageData(0, 0, LUMA_W, LUMA_H).data
     const hist = new Uint32Array(256)
     const pixels = d.length / 4
@@ -342,7 +365,7 @@ const DEFAULT_STUDIO: StudioLook = {
 function drawCamera(
   ctx: CanvasRenderingContext2D,
   p: Project,
-  cam: HTMLVideoElement,
+  cam: FrameSource,
   W: number,
   H: number
 ): void {
@@ -379,8 +402,8 @@ function drawCamera(
   roundRectPath(ctx, x + inset, y + inset, size - inset * 2, size - inset * 2, ir)
   ctx.clip()
 
-  const vw = cam.videoWidth
-  const vh = cam.videoHeight
+  const vw = cam.width
+  const vh = cam.height
   const zoom = p.camera.zoom || 1
   const scale = Math.max(size / vw, size / vh) * zoom
   const dw = vw * scale
@@ -401,7 +424,7 @@ function drawCamera(
   }
 
   if (k === 0) {
-    ctx.drawImage(cam, dx, dy, dw, dh)
+    ctx.drawImage(cam.drawable, dx, dy, dw, dh)
   } else {
     const need = st.autoLight ? cameraFillLight(cam) : 0.12
 
@@ -411,7 +434,7 @@ function drawCamera(
       `contrast(${(1 + 0.14 * k).toFixed(3)}) ` +
       `saturate(${(1 + 0.28 * k).toFixed(3)}) ` +
       `sepia(${(0.22 * k * warm).toFixed(3)})`
-    ctx.drawImage(cam, dx, dy, dw, dh)
+    ctx.drawImage(cam.drawable, dx, dy, dw, dh)
     ctx.filter = 'none'
 
     // 2. Fill light. `screen` raises shadows hard while barely touching
@@ -421,7 +444,7 @@ function drawCamera(
     if (fill > 0.005) {
       ctx.globalCompositeOperation = 'screen'
       ctx.globalAlpha = fill
-      ctx.drawImage(cam, dx, dy, dw, dh)
+      ctx.drawImage(cam.drawable, dx, dy, dw, dh)
       ctx.globalAlpha = 1
       ctx.globalCompositeOperation = 'source-over'
     }
@@ -431,7 +454,7 @@ function drawCamera(
     ctx.globalCompositeOperation = 'lighten'
     ctx.globalAlpha = 0.3 * k
     ctx.filter = `blur(${Math.max(1, size * 0.04).toFixed(2)}px) brightness(1.15)`
-    ctx.drawImage(cam, dx, dy, dw, dh)
+    ctx.drawImage(cam.drawable, dx, dy, dw, dh)
     ctx.filter = 'none'
     ctx.globalAlpha = 1
     ctx.globalCompositeOperation = 'source-over'

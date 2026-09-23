@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Project } from '../lib/types'
-import { clipToOutput, outputToSource, renderFrame, totalDuration } from '../lib/composite'
+import {
+  clipToOutput,
+  outputToSource,
+  renderFrame,
+  totalDuration,
+  videoSource
+} from '../lib/composite'
 
 interface Refs {
   canvas: HTMLCanvasElement | null
@@ -24,7 +30,7 @@ export function usePlayback(project: Project | null, refs: Refs) {
     if (!p || !canvas || !screen) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    renderFrame(ctx, p, screen.currentTime, screen, camera)
+    renderFrame(ctx, p, screen.currentTime, videoSource(screen), camera ? videoSource(camera) : null)
   }, [refs])
 
   useEffect(() => {

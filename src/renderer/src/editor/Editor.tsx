@@ -8,7 +8,7 @@ import { deleteClip, outputSizeFor, splitAt, totalDuration, trimClip } from '../
 import { uid } from '../lib/uid'
 import { usePlayback } from './usePlayback'
 import { exportProject } from './export'
-import { renderOffline, webCodecsAvailable } from './exportOffline'
+import { fastPathAvailable, renderAndSave, renderOffline, webCodecsAvailable } from './exportOffline'
 import Timeline from './Timeline'
 import Inspector from './Inspector'
 
@@ -253,7 +253,22 @@ export default function Editor(): JSX.Element {
     setExportError(null)
     await window.ledger.export.keepAwake(true).catch(() => {})
     try {
-      if (webCodecsAvailable()) {
+      if (fastPathAvailable(project)) {
+        // Frames come from ffmpeg and the encode streams to disk: roughly an
+        // order of magnitude faster than seeking, with bounded memory.
+        let audioWarning: string | null = null
+        const res = await renderAndSave(project, 'recording.mp4', {
+          onProgress: (f, label) => {
+            setProgress(f)
+            setStage(label)
+          },
+          onAudioIssue: (reason) => {
+            audioWarning = reason
+          }
+        })
+        if (audioWarning) setExportError(`Exported without audio (${audioWarning}).`)
+        if (!res.canceled && res.filePath) setSavedPath(res.filePath)
+      } else if (webCodecsAvailable()) {
         // Frame-exact offline render: immune to stalls, focus changes and
         // throttling, which is what used to freeze the picture.
         let audioWarning: string | null = null
