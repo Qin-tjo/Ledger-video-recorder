@@ -1,13 +1,21 @@
 import type { Project } from '../lib/types'
-import { bitmapSource, clipDur, renderFrame, resetAutoGain } from '../lib/composite'
+import {
+  bitmapSource,
+  clipDur,
+  renderFrame,
+  resetAutoGain,
+  screenRect,
+  zoomStateAt
+} from '../lib/composite'
 
 /**
  * Export: the one path from a project to an MP4 on disk.
  *
- *   ffmpeg decodes source frames (main) → renderFrame composites them onto a
- *   canvas → VideoEncoder → encoded chunks stream to a temp file (main) →
- *   ffmpeg muxes with audio cut from the source → the result is validated,
- *   then moved into place.
+ *   ffmpeg decodes source frames, already cropped and scaled to the pixels the
+ *   output needs (main, several chunks in parallel) → renderFrame composites
+ *   them onto a canvas → VideoEncoder → encoded chunks stream to a temp file
+ *   (main) → ffmpeg muxes with audio cut from the source → the result is
+ *   validated, then moved into place.
  *
  * Every step that has failed in the wild is handled here rather than surfaced
  * as a crash:
@@ -38,10 +46,34 @@ export interface ExportResult {
   audio?: 'ok' | 'none' | 'failed'
   audioDetail?: string
   encoder?: 'hardware' | 'software'
+  /** Where the time went, in ms — reported by the export test. */
+  timings?: ExportTimings
+}
+
+export interface ExportTimings {
+  total: number
+  /** Blocked waiting for decoded source frames. */
+  waitFrames: number
+  /** Compositing onto the canvas. */
+  draw: number
+  /** Creating the VideoFrame and handing it to the encoder. */
+  encode: number
+  /** Blocked because the encoder queue was full. */
+  backpressure: number
+  /** Flush + mux + validate. */
+  finish: number
 }
 
 /** Frames per ffmpeg call: amortizes process startup, keeps buffers modest. */
 const CHUNK_FRAMES = 120
+/** ffmpeg processes decoding ahead in parallel. Its JPEG encoder is
+ * single-threaded, so this is where multiple cores pay off. */
+const PARALLEL_CHUNKS = 3
+/** Frames decoded to bitmaps ahead of drawing. Chunks stay compressed until
+ * then, so memory stays ~100MB instead of gigabytes of full-size bitmaps. */
+const BITMAP_LOOKAHEAD = 12
+/** Encoder queue depth before we wait for it to catch up. */
+const ENCODER_QUEUE = 16
 /** How much missing footage at the end of a recording we paper over. */
 const MAX_HELD_SECONDS = 2
 /** An encoder that accepts no work for this long is treated as dead. */
@@ -155,60 +187,111 @@ function splitJpegs(buf: Uint8Array): Uint8Array[] {
   return out
 }
 
-async function decodeChunk(
-  path: string,
-  startSec: number,
-  count: number,
-  fps: number
-): Promise<ImageBitmap[]> {
-  const raw = await window.ledger.export.extractFrames(path, startSec, count, fps)
-  const jpegs = splitJpegs(new Uint8Array(raw))
-  const settled = await Promise.allSettled(
-    jpegs.map((j) => createImageBitmap(new Blob([j as BlobPart], { type: 'image/jpeg' })))
-  )
-  // Keep the frames that decoded, in order; a damaged frame is replaced by
-  // its neighbour downstream rather than failing the export.
-  return settled.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []))
+type Shape = Parameters<typeof window.ledger.export.extractFrames>[4]
+
+/** Integer pixel crop of `frac` within a `w`x`h` frame, kept inside it. */
+function cropPx(
+  frac: { x: number; y: number; w: number; h: number },
+  w: number,
+  h: number
+): { x: number; y: number; w: number; h: number } {
+  const x = Math.min(w - 2, Math.max(0, Math.round(frac.x * w)))
+  const y = Math.min(h - 2, Math.max(0, Math.round(frac.y * h)))
+  return {
+    x,
+    y,
+    w: Math.max(2, Math.min(w - x, Math.round(frac.w * w))),
+    h: Math.max(2, Math.min(h - y, Math.round(frac.h * h)))
+  }
 }
 
 /**
- * Serves one frame per output frame, holding the last good frame across gaps
- * (a truncated tail, a camera track that ended early, a damaged frame).
+ * The smallest frames that still draw pixel-for-pixel: the output rect's
+ * size, times the strongest zoom in this stretch (a punch-in needs the extra
+ * detail). Never upscales past the source.
+ */
+function screenShape(
+  project: Project,
+  srcW: number,
+  srcH: number,
+  maxZoom: number
+): NonNullable<Shape> {
+  const crop = project.crop ? cropPx(project.crop, srcW, srcH) : null
+  const w = crop ? crop.w : srcW
+  const h = crop ? crop.h : srcH
+  const rect = screenRect(project, project.outputWidth, project.outputHeight)
+  const f = Math.min(1, Math.max(rect.w / w, rect.h / h) * maxZoom)
+  return { crop, width: even(Math.round(w * f)), height: even(Math.round(h * f)) }
+}
+
+/** The camera bubble samples its source at bubble size × camera zoom. */
+function cameraShape(project: Project, srcW: number, srcH: number): NonNullable<Shape> {
+  const need = project.camera.size * project.outputHeight * (project.camera.zoom || 1)
+  const f = Math.min(1, need / Math.min(srcW, srcH))
+  return { crop: null, width: even(Math.round(srcW * f)), height: even(Math.round(srcH * f)) }
+}
+
+/** Fetch a chunk's frames as compressed JPEGs. */
+async function fetchJpegs(
+  path: string,
+  startSec: number,
+  count: number,
+  fps: number,
+  shape: Shape
+): Promise<Uint8Array[]> {
+  const raw = await window.ledger.export.extractFrames(path, startSec, count, fps, shape)
+  return splitJpegs(new Uint8Array(raw))
+}
+
+const toBitmap = (jpeg: Uint8Array | undefined): Promise<ImageBitmap | null> =>
+  jpeg
+    ? createImageBitmap(new Blob([jpeg as BlobPart], { type: 'image/jpeg' })).catch(() => null)
+    : Promise.resolve(null)
+
+/**
+ * Turns a chunk of JPEGs into one bitmap per output frame, decoding a few
+ * frames ahead. A missing or damaged frame repeats the last good one (a
+ * truncated tail, a camera that stopped early), and those repeats are counted
+ * so a badly broken recording is still reported rather than papered over.
  */
 class FrameFeed {
-  private held: ImageBitmap | null = null
-  heldFrames = 0
+  private last: ImageBitmap | null = null
+  private jpegs: Uint8Array[] = []
+  private ahead: (Promise<ImageBitmap | null> | undefined)[] = []
+  repeated = 0
 
-  /** Take ownership of a decoded chunk and return exactly `n` frames. */
-  take(chunk: ImageBitmap[], n: number): (ImageBitmap | null)[] {
-    const out: (ImageBitmap | null)[] = []
-    for (let k = 0; k < n; k++) {
-      if (k < chunk.length) {
-        out.push(chunk[k])
-      } else {
-        out.push(chunk.length ? chunk[chunk.length - 1] : this.held)
-        this.heldFrames++
-      }
+  load(jpegs: Uint8Array[]): void {
+    this.jpegs = jpegs
+    this.ahead = []
+    for (let k = 0; k < Math.min(BITMAP_LOOKAHEAD, jpegs.length); k++) {
+      this.ahead[k] = toBitmap(jpegs[k])
     }
-    return out
   }
 
-  /** After a chunk is drawn: keep its last frame for gaps, free the rest. */
-  release(chunk: ImageBitmap[]): void {
-    if (!chunk.length) return
-    const last = chunk[chunk.length - 1]
-    for (const b of chunk) if (b !== last) b.close()
-    if (this.held && this.held !== last) this.held.close()
-    this.held = last
+  /** The frame to draw for position `k` of the current chunk. */
+  async frame(k: number): Promise<ImageBitmap | null> {
+    const next = k + BITMAP_LOOKAHEAD
+    if (next < this.jpegs.length && !this.ahead[next]) this.ahead[next] = toBitmap(this.jpegs[next])
+    const bmp = k < this.jpegs.length ? await this.ahead[k] : null
+    this.ahead[k] = undefined
+    if (bmp) {
+      this.last?.close()
+      this.last = bmp
+    } else {
+      this.repeated++
+    }
+    return this.last
   }
 
   get hasFrame(): boolean {
-    return this.held !== null
+    return this.last !== null
   }
 
   dispose(): void {
-    this.held?.close()
-    this.held = null
+    this.last?.close()
+    this.last = null
+    for (const p of this.ahead) p?.then((b) => b?.close())
+    this.ahead = []
   }
 }
 
@@ -256,15 +339,44 @@ async function renderPass(
   const width = even(source.outputWidth)
   const height = even(source.outputHeight)
   const project: Project = { ...source, outputWidth: width, outputHeight: height }
+  // Frames arrive already cropped by ffmpeg, so the compositor must not crop again.
+  const drawProject: Project = { ...project, crop: null }
   const screenPath = project.screenPath!
   const cameraPath = project.camera.enabled ? project.cameraPath : null
 
   const { frames: plan, ranges } = framePlan(project, fps)
   const frameCount = plan.length
-  const maxHeld = Math.round(MAX_HELD_SECONDS * fps)
+  const maxRepeated = Math.round(MAX_HELD_SECONDS * fps)
 
   // Resolve everything that can fail up front, before any temp file exists.
   const config = await encoderConfigFor(width, height, fps, accel)
+  const screenInfo = await window.ledger.export.probe(screenPath)
+  if (!screenInfo.hasVideo || !screenInfo.width) throw new Error('the recording has no readable video')
+  const cameraInfo = cameraPath
+    ? await window.ledger.export.probe(cameraPath).catch(() => null)
+    : null
+  const camShape =
+    cameraInfo?.hasVideo && cameraInfo.width
+      ? cameraShape(project, cameraInfo.width, cameraInfo.height)
+      : null
+
+  // Split the plan into chunks: up to CHUNK_FRAMES consecutive frames, never
+  // across a cut, so each ffmpeg call decodes one contiguous span.
+  const chunks: { i: number; n: number; shape: NonNullable<Shape> }[] = []
+  for (let i = 0; i < frameCount; ) {
+    let n = 1
+    while (
+      n < CHUNK_FRAMES &&
+      i + n < frameCount &&
+      Math.abs(plan[i + n] - (plan[i] + n / fps)) < 1e-6
+    ) {
+      n++
+    }
+    let maxZoom = 1
+    for (let k = i; k < i + n; k++) maxZoom = Math.max(maxZoom, zoomStateAt(project.zooms, plan[k]).scale)
+    chunks.push({ i, n, shape: screenShape(project, screenInfo.width, screenInfo.height, maxZoom) })
+    i += n
+  }
 
   const canvas = document.createElement('canvas')
   canvas.width = width
@@ -273,12 +385,16 @@ async function renderPass(
   if (!ctx) throw new Error('could not create a drawing surface for the export')
 
   const streamId = await window.ledger.export.streamBegin()
+  const t: ExportTimings = { total: 0, waitFrames: 0, draw: 0, encode: 0, backpressure: 0, finish: 0 }
+  const tStart = performance.now()
 
   let encoderError: Error | null = null
   let writeError: Error | null = null
   // Once the pass is over (finished or failed), late encoder output must not
   // reach a stream that has already been closed or deleted.
   let accepting = true
+  // Resolves a wait for queue room; called when the encoder frees a slot or fails.
+  let wake: (() => void) | null = null
   const writes: Promise<void>[] = []
   const encoder = new VideoEncoder({
     output: (chunk) => {
@@ -293,12 +409,14 @@ async function renderPass(
     },
     error: (e) => {
       encoderError = encoderError ?? new EncoderFailure(`video encoder failed: ${e.message}`)
+      wake?.()
     }
   })
+  encoder.addEventListener('dequeue', () => wake?.())
 
   const screenFeed = new FrameFeed()
   const cameraFeed = new FrameFeed()
-  let pending: Promise<[ImageBitmap[], ImageBitmap[]]> | null = null
+  const inFlight = new Map<number, Promise<[Uint8Array[], Uint8Array[]]>>()
 
   /** Throw whichever failure happened first, if any. */
   const check = (): void => {
@@ -306,6 +424,45 @@ async function renderPass(
     if (writeError) throw writeError
     if (encoder.state !== 'configured') {
       throw new EncoderFailure(`video encoder stopped unexpectedly (state: ${encoder.state})`)
+    }
+  }
+
+  /** Wait until the encoder has room, woken by its own 'dequeue' event rather
+   * than a polling timer. A wedged encoder must not hang the export forever. */
+  const waitForRoom = async (): Promise<void> => {
+    const began = performance.now()
+    while (encoder.encodeQueueSize > ENCODER_QUEUE) {
+      check()
+      const left = ENCODER_STALL_MS - (performance.now() - began)
+      if (left <= 0) throw new EncoderFailure('video encoder stopped responding')
+      await new Promise<void>((res) => {
+        const timer = setTimeout(res, Math.min(left, 250))
+        wake = () => {
+          clearTimeout(timer)
+          res()
+        }
+      })
+      wake = null
+    }
+  }
+
+  const fetchChunk = (c: number): Promise<[Uint8Array[], Uint8Array[]]> => {
+    const { i, n, shape } = chunks[c]
+    const screen = fetchJpegs(screenPath, plan[i], n, fps, shape).catch((e) => {
+      // A decode failure is only survivable if there's a frame to repeat.
+      if (screenFeed.hasFrame || c > 0) return [] as Uint8Array[]
+      throw new Error(`could not read the recording: ${e instanceof Error ? e.message : e}`)
+    })
+    // The camera is optional: if it can't be read, keep going without it.
+    const camera =
+      cameraPath && camShape
+        ? fetchJpegs(cameraPath, plan[i], n, fps, camShape).catch(() => [] as Uint8Array[])
+        : Promise.resolve([] as Uint8Array[])
+    return Promise.all([screen, camera])
+  }
+  const fillPipeline = (from: number): void => {
+    for (let c = from; c < Math.min(chunks.length, from + PARALLEL_CHUNKS); c++) {
+      if (!inFlight.has(c)) inFlight.set(c, fetchChunk(c))
     }
   }
 
@@ -318,39 +475,7 @@ async function renderPass(
     resetAutoGain()
     const frameDurUs = 1_000_000 / fps
 
-    // A chunk covers up to CHUNK_FRAMES consecutive frames, never across a cut,
-    // so ffmpeg always decodes one contiguous span.
-    const chunkLen = (i: number): number => {
-      let n = 1
-      while (
-        n < CHUNK_FRAMES &&
-        i + n < frameCount &&
-        Math.abs(plan[i + n] - (plan[i] + n / fps)) < 1e-6
-      ) {
-        n++
-      }
-      return n
-    }
-
-    const fetchChunk = (i: number, n: number): Promise<[ImageBitmap[], ImageBitmap[]]> => {
-      const screen = decodeChunk(screenPath, plan[i], n, fps).catch((e) => {
-        // A decode failure is only survivable if there's a frame to hold.
-        if (screenFeed.hasFrame) return [] as ImageBitmap[]
-        throw new Error(`could not read the recording: ${e instanceof Error ? e.message : e}`)
-      })
-      // The camera is optional: if it can't be read, keep going without it.
-      const camera = cameraPath
-        ? decodeChunk(cameraPath, plan[i], n, fps).catch(() => [] as ImageBitmap[])
-        : Promise.resolve([] as ImageBitmap[])
-      return Promise.all([screen, camera])
-    }
-
-    let i = 0
-    let n = chunkLen(0)
-    // Decode the next chunk while this one encodes.
-    pending = fetchChunk(0, n)
-
-    while (i < frameCount) {
+    for (let c = 0; c < chunks.length; c++) {
       if (opts.signal?.cancelled) {
         accepting = false
         encoder.close()
@@ -359,35 +484,41 @@ async function renderPass(
         return { canceled: true }
       }
 
-      if (!pending) throw new Error('export lost track of its next frames')
-      const [screens, cams] = await pending
-      pending = null
-      const nextI = i + n
-      const nextN = nextI < frameCount ? chunkLen(nextI) : 0
-      if (nextN) pending = fetchChunk(nextI, nextN)
+      fillPipeline(c)
+      let t0 = performance.now()
+      const [screenJpegs, cameraJpegs] = await inFlight.get(c)!
+      inFlight.delete(c)
+      fillPipeline(c + 1)
+      t.waitFrames += performance.now() - t0
 
-      if (!screens.length && !screenFeed.hasFrame) {
-        throw new Error('could not read any video from the recording')
-      }
-      const sFrames = screenFeed.take(screens, n)
-      const cFrames = cameraFeed.take(cams, n)
-      if (screenFeed.heldFrames > maxHeld) {
-        throw new Error(
-          `the recording ends early — about ${(screenFeed.heldFrames / fps).toFixed(1)}s of video is missing`
-        )
-      }
+      screenFeed.load(screenJpegs)
+      cameraFeed.load(cameraJpegs)
+      const { i, n } = chunks[c]
 
       for (let k = 0; k < n; k++) {
         const idx = i + k
-        const s = sFrames[k]!
-        const c = cFrames[k]
-        renderFrame(ctx, project, plan[idx], bitmapSource(s), c ? bitmapSource(c) : null)
+        t0 = performance.now()
+        const s = await screenFeed.frame(k)
+        const cam = cameraJpegs.length || cameraFeed.hasFrame ? await cameraFeed.frame(k) : null
+        t.waitFrames += performance.now() - t0
+
+        if (!s) throw new Error('could not read any video from the recording')
+        if (screenFeed.repeated > maxRepeated) {
+          throw new Error(
+            `the recording ends early — about ${(screenFeed.repeated / fps).toFixed(1)}s of video is missing`
+          )
+        }
+
+        t0 = performance.now()
+        renderFrame(ctx, drawProject, plan[idx], bitmapSource(s), cam ? bitmapSource(cam) : null)
+        t.draw += performance.now() - t0
 
         check()
         if (failAt !== undefined && idx === failAt) {
           throw new EncoderFailure('injected encoder failure (test)')
         }
 
+        t0 = performance.now()
         const frame = new VideoFrame(canvas, {
           timestamp: Math.round(idx * frameDurUs),
           duration: Math.round(frameDurUs)
@@ -399,25 +530,17 @@ async function renderPass(
         } finally {
           frame.close()
         }
+        t.encode += performance.now() - t0
 
-        // Back-pressure, with a deadline: a wedged encoder must not hang forever.
-        const waitStart = performance.now()
-        while (encoder.encodeQueueSize > 8) {
-          check()
-          if (performance.now() - waitStart > ENCODER_STALL_MS) {
-            throw new EncoderFailure('video encoder stopped responding')
-          }
-          await new Promise((r) => setTimeout(r, 2))
-        }
+        t0 = performance.now()
+        await waitForRoom()
+        t.backpressure += performance.now() - t0
       }
 
-      screenFeed.release(screens)
-      cameraFeed.release(cams)
-      i = nextI
-      n = nextN
-      opts.onProgress?.((i / frameCount) * 0.95, 'Rendering video')
+      opts.onProgress?.(((i + n) / frameCount) * 0.95, 'Rendering video')
     }
 
+    const tFinish = performance.now()
     try {
       await encoder.flush()
     } catch (e) {
@@ -436,12 +559,15 @@ async function renderPass(
       outPath
     )
     opts.onProgress?.(1, 'Done')
+    t.finish = performance.now() - tFinish
+    t.total = performance.now() - tStart
     return {
       canceled: false,
       filePath: res.filePath,
       audio: res.audio,
       audioDetail: res.audioDetail,
-      encoder: accel === 'prefer-hardware' ? 'hardware' : 'software'
+      encoder: accel === 'prefer-hardware' ? 'hardware' : 'software',
+      timings: t
     }
   } catch (e) {
     // Stop the encoder before discarding its stream, so nothing is written
@@ -449,14 +575,11 @@ async function renderPass(
     accepting = false
     if (encoder.state !== 'closed') encoder.close()
     await Promise.allSettled(writes)
-    pending?.then(
-      ([a, b]) => [...a, ...b].forEach((bm) => bm.close()),
-      () => {}
-    )
     await window.ledger.export.streamAbort(streamId).catch(() => {})
     throw e
   } finally {
     if (encoder.state !== 'closed') encoder.close()
+    for (const p of inFlight.values()) p.catch(() => {})
     screenFeed.dispose()
     cameraFeed.dispose()
   }

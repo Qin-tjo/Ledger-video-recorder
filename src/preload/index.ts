@@ -7,6 +7,12 @@ export interface CaptureSource {
   type: 'screen' | 'window'
 }
 
+export interface FrameShape {
+  crop: { x: number; y: number; w: number; h: number } | null
+  width: number
+  height: number
+}
+
 export interface FinishSpec {
   fps: number
   frames: number
@@ -62,13 +68,18 @@ const api = {
      * never wastes a whole render. Returns null when cancelled. */
     chooseSavePath: (suggested: string): Promise<string | null> =>
       ipcRenderer.invoke('export:chooseSavePath', suggested),
+    probe: (
+      src: string
+    ): Promise<{ hasVideo: boolean; hasAudio: boolean; width: number; height: number }> =>
+      ipcRenderer.invoke('export:probe', src),
     extractFrames: (
       src: string,
       startSec: number,
       count: number,
-      fps: number
+      fps: number,
+      shape: FrameShape | null
     ): Promise<ArrayBuffer> =>
-      ipcRenderer.invoke('export:extractFrames', src, startSec, count, fps),
+      ipcRenderer.invoke('export:extractFrames', src, startSec, count, fps, shape),
     streamBegin: (): Promise<string> => ipcRenderer.invoke('export:streamBegin'),
     streamWrite: (id: string, data: ArrayBuffer): Promise<void> =>
       ipcRenderer.invoke('export:streamWrite', id, data),

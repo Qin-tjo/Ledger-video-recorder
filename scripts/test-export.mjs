@@ -68,13 +68,15 @@ const cases = [
     expect: { w: 1892, h: 1080 } },
   { ...base, name: 'crop-1924x1080 (the reported bug)',
     crop: { x: 0.24, y: 0.175, w: 0.7587, h: 0.7461 }, size: { width: 1924, height: 1080 },
-    expect: { w: 1924, h: 1080 } },
+    expect: { w: 1924, h: 1080 }, geometry: [1.0, 4.5] },
   { ...base, name: 'wide-2560x1080 (needs Level 5.0)',
     crop: { x: 0, y: 0.2, w: 1, h: 0.5 }, size: { width: 2560, height: 1080 },
     expect: { w: 2560, h: 1080 } },
   { ...base, name: 'wide-2560x834 (needs Level 4.2)',
     crop: { x: 0, y: 0.25, w: 1, h: 0.48 }, size: { width: 2560, height: 834 },
-    expect: { w: 2560, h: 834 } },
+    expect: { w: 2560, h: 834 }, geometry: [2.0] },
+  { ...base, name: 'uncropped, picture check',
+    expect: { w: 1892, h: 1080 }, geometry: [0.5, 3.0] },
   { ...base, name: 'odd-size 321x181 (rounded to even)',
     crop: { x: 0.4, y: 0.4, w: 0.11, h: 0.11 }, size: { width: 321, height: 181 },
     expect: { w: 320, h: 180 } },
@@ -164,6 +166,41 @@ function inspect(file) {
   }
 }
 
+/**
+ * Compare exported frames with an independent ffmpeg crop + cover-fit of the
+ * source at the same instant (cover-fit, centred, is how the compositor fills
+ * the frame). A wrong crop offset or scale shows up as a
+ * collapse in PSNR long before it would be obvious by eye.
+ */
+const MIN_PSNR = 30
+function pictureCheck(c) {
+  const [W, H] = [c.expect.w, c.expect.h]
+  let crop = ''
+  if (c.crop) {
+    const x = Math.min(c.srcW - 2, Math.max(0, Math.round(c.crop.x * c.srcW)))
+    const y = Math.min(c.srcH - 2, Math.max(0, Math.round(c.crop.y * c.srcH)))
+    const w = Math.max(2, Math.min(c.srcW - x, Math.round(c.crop.w * c.srcW)))
+    const h = Math.max(2, Math.min(c.srcH - y, Math.round(c.crop.h * c.srcH)))
+    crop = `crop=${w}:${h}:${x}:${y},`
+  }
+  const problems = []
+  for (const t of c.geometry) {
+    // Extract each frame on its own, then compare: seeking two inputs inside
+    // one filter graph can pair frames from different instants.
+    const a = join(work, `psnr-out.png`)
+    const b = join(work, `psnr-ref.png`)
+    ff(['-v', 'error', '-ss', String(t), '-i', c.outPath, '-frames:v', '1', '-y', a])
+    ff(['-v', 'error', '-ss', String(t), '-i', c.screenPath, '-vf', `${crop}scale=${W}:${H}:flags=bicubic:force_original_aspect_ratio=increase,crop=${W}:${H}`, '-frames:v', '1', '-y', b])
+    const r = ff(['-hide_banner', '-i', a, '-i', b,
+      '-lavfi', '[0:v]format=yuv420p[o];[1:v]format=yuv420p[ref];[o][ref]psnr', '-f', 'null', '-'])
+    const m = /PSNR .*?average:([\d.]+|inf)/.exec(r.err)
+    const psnr = m ? (m[1] === 'inf' ? Infinity : Number(m[1])) : NaN
+    if (!(psnr >= MIN_PSNR)) problems.push(`picture at ${t}s differs from the source (PSNR ${m?.[1] ?? '?'} dB, want ≥ ${MIN_PSNR})`)
+    else c.psnr = [...(c.psnr ?? []), psnr]
+  }
+  return problems
+}
+
 console.log('\nVerifying with ffmpeg:\n')
 let failed = 0
 for (const c of allCases) {
@@ -183,11 +220,19 @@ for (const c of allCases) {
     if (m.decodeErrors) problems.push(`decode errors: ${m.decodeErrors.slice(0, 200)}`)
     if (c.expect.encoder && r.result.encoder !== c.expect.encoder) problems.push(`encoder ${r.result.encoder}, want ${c.expect.encoder}`)
     if (existsSync(join(dirname(c.outPath), `.${c.outPath.split('/').pop()}.lvr-partial`))) problems.push('left a partial file')
+    if (c.geometry) problems.push(...pictureCheck(c))
   }
   const ok = problems.length === 0
   if (!ok) failed++
-  console.log(`${ok ? '  ✓' : '  ✗'} ${c.name}${r ? `  (${(r.ms / 1000).toFixed(1)}s)` : ''}`)
+  const psnr = c.psnr ? `  picture ${Math.min(...c.psnr).toFixed(1)} dB` : ''
+  console.log(`${ok ? '  ✓' : '  ✗'} ${c.name}${r ? `  (${(r.ms / 1000).toFixed(1)}s)` : ''}${psnr}`)
   for (const p of problems) console.log(`      ${p}`)
+  const tm = r?.result?.timings
+  if (tm && (process.argv.includes('--timings') || tm.total > 10000)) {
+    const f = (k) => `${k} ${(tm[k] / 1000).toFixed(1)}s`
+    const fps = (c.expectFrames / (tm.total / 1000)).toFixed(0)
+    console.log(`      ${fps} fps · ${['waitFrames', 'draw', 'encode', 'backpressure', 'finish'].map(f).join(' · ')}`)
+  }
 }
 
 const leftovers = readdirSafe(tmpdir()).filter((n) => /^lvr-\d/.test(n))

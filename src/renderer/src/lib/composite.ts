@@ -132,7 +132,7 @@ export function zoomStateAt(effects: ZoomEffect[], t: number): ZoomState {
 
 // Layout of the inset screen rect (accounting for background padding) ------
 
-function screenRect(
+export function screenRect(
   p: Project,
   W: number,
   H: number

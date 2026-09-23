@@ -28,11 +28,20 @@ function run(args: string[]): Promise<RunResult> {
 
 const tail = (s: string, n = 400): string => s.trim().slice(-n)
 
+/** Pixel region and size to deliver frames at. Cropping and scaling here,
+ * before JPEG encoding, is the single biggest export speedup: a 2940x1678
+ * Retina frame destined for a 1080p output is 2.4x more pixels than needed. */
+export interface FrameShape {
+  crop: { x: number; y: number; w: number; h: number } | null
+  width: number
+  height: number
+}
+
 /**
- * Decode `count` frames starting at `startSec`, resampled to `fps`, and return
- * them as concatenated JPEGs. Returns fewer frames (possibly none) when the
- * span runs past the end of the file — MediaRecorder output is often
- * truncated, so that is expected and handled by the caller.
+ * Decode `count` frames starting at `startSec`, resampled to `fps` and shaped
+ * to `shape`, and return them as concatenated JPEGs. Returns fewer frames
+ * (possibly none) when the span runs past the end of the file — MediaRecorder
+ * output is often truncated, so that is expected and handled by the caller.
  *
  * Why this exists: asking an HTMLVideoElement for one frame at a time costs
  * ~100ms per seek in Chromium regardless of codec (pipeline overhead, not
@@ -44,14 +53,19 @@ export async function extractFramesJpeg(
   startSec: number,
   count: number,
   fps: number,
+  shape: FrameShape | null,
   quality = 2
 ): Promise<Buffer> {
+  const vf: string[] = []
+  if (shape?.crop) vf.push(`crop=${shape.crop.w}:${shape.crop.h}:${shape.crop.x}:${shape.crop.y}`)
+  if (shape) vf.push(`scale=${shape.width}:${shape.height}`)
+  vf.push(`fps=${fps}`)
   // prettier-ignore
   const r = await run([
     '-v', 'error',
     '-ss', Math.max(0, startSec).toFixed(4),
     '-i', src,
-    '-vf', `fps=${fps}`,
+    '-vf', vf.join(','),
     '-frames:v', String(count),
     '-q:v', String(quality),
     '-f', 'image2pipe',
@@ -67,6 +81,9 @@ export async function extractFramesJpeg(
 export interface MediaInfo {
   hasVideo: boolean
   hasAudio: boolean
+  /** Coded size of the first video stream; 0 when there is none. */
+  width: number
+  height: number
   /** null when the container doesn't record one (e.g. MediaRecorder WebM). */
   duration: number | null
 }
@@ -81,7 +98,10 @@ export async function probeMedia(src: string): Promise<MediaInfo> {
     throw new Error(`cannot read ${src}: ${tail(s, 200)}`)
   }
   const d = /Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/.exec(s)
+  const v = /Stream #\d+:\d+.*?: Video: .*?, (\d{2,5})x(\d{2,5})/.exec(s)
   return {
+    width: v ? Number(v[1]) : 0,
+    height: v ? Number(v[2]) : 0,
     hasVideo: /Stream #\d+:\d+.*?: Video:/.test(s),
     hasAudio: /Stream #\d+:\d+.*?: Audio:/.test(s),
     duration: d ? Number(d[1]) * 3600 + Number(d[2]) * 60 + Number(d[3]) : null

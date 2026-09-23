@@ -1,7 +1,13 @@
 import { app, dialog, ipcMain, type BrowserWindow } from 'electron'
 import { createWriteStream, promises as fs, type WriteStream } from 'fs'
 import { basename, dirname, join, resolve, sep } from 'path'
-import { extractFramesJpeg, muxExport, probeMedia, validateOutput } from './ffmpeg'
+import {
+  extractFramesJpeg,
+  muxExport,
+  probeMedia,
+  validateOutput,
+  type FrameShape
+} from './ffmpeg'
 
 /**
  * Export pipeline, main-process side.
@@ -38,6 +44,33 @@ interface Stream {
   path: string
   fd: WriteStream
   error: Error | null
+}
+
+// These values are interpolated into an ffmpeg filter graph, so accept only
+// plain in-range numbers from the renderer.
+function num(v: unknown, lo: number, hi: number): number {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < lo || v > hi) {
+    throw new Error('invalid export parameter')
+  }
+  return v
+}
+const int = (v: unknown, lo: number, hi: number): number => {
+  const n = num(v, lo, hi)
+  if (!Number.isInteger(n)) throw new Error('invalid export parameter')
+  return n
+}
+function checkShape(v: unknown): FrameShape | null {
+  if (v === null || v === undefined) return null
+  const s = v as FrameShape
+  const crop = s.crop
+    ? {
+        x: int(s.crop.x, 0, 16384),
+        y: int(s.crop.y, 0, 16384),
+        w: int(s.crop.w, 2, 16384),
+        h: int(s.crop.h, 2, 16384)
+      }
+    : null
+  return { crop, width: int(s.width, 2, 16384), height: int(s.height, 2, 16384) }
 }
 
 const TEMP_PREFIX = 'lvr-'
@@ -99,10 +132,18 @@ export function registerExportHandlers(deps: ExportDeps): void {
     return p
   })
 
+  ipcMain.handle('export:probe', async (_e, src: string) => probeMedia(inRecordings(src)))
+
   ipcMain.handle(
     'export:extractFrames',
-    async (_e, src: string, startSec: number, count: number, fps: number) => {
-      const buf = await extractFramesJpeg(inRecordings(src), startSec, count, fps)
+    async (_e, src: string, startSec: number, count: number, fps: number, shape: unknown) => {
+      const buf = await extractFramesJpeg(
+        inRecordings(src),
+        num(startSec, 0, 1e6),
+        int(count, 1, 10_000),
+        int(fps, 1, 240),
+        checkShape(shape)
+      )
       return new Uint8Array(buf).buffer
     }
   )
