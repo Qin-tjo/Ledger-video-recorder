@@ -14,16 +14,15 @@
     "pack": "npm run build && electron-builder --dir",
     "app:install": "npm run build && electron-builder --dir && rm -rf \"/Applications/Ledger Video Recorder.app\" && cp -R dist/mac*/*.app /Applications/ && open -R \"/Applications/Ledger Video Recorder.app\" && echo \"Installed to /Applications — launch it from Spotlight (Cmd+Space).\"",
     "dist:mac": "npm run build && electron-builder --mac",
-    "dist:win": "npm run build && electron-builder --win"
+    "dist:win": "npm run build && electron-builder --win",
+    "test:export": "node scripts/test-export.mjs"
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
-    "fluent-ffmpeg": "^2.1.3",
     "zustand": "^4.5.5"
   },
   "devDependencies": {
     "@electron/notarize": "^2.5.0",
-    "@types/fluent-ffmpeg": "^2.1.27",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",

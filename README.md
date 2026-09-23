@@ -59,6 +59,7 @@ Other scripts:
 
 ```bash
 npm run typecheck  # type-check the whole project
+npm run test:export # export real videos end to end and verify them with ffmpeg
 npm run build      # production build into ./out
 npm run pack       # unpacked .app in ./dist for local testing
 npm run dist:mac   # build the .dmg + .zip

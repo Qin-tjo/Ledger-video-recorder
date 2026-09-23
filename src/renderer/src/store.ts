@@ -23,6 +23,9 @@ interface AppState {
   commit: () => void
   undo: () => void
   redo: () => void
+  /** Record where the sources live on disk. Not an edit: it isn't undoable,
+   * and it's applied to history too so undo can't forget it. */
+  setSourcePaths: (screenPath: string, cameraPath: string | null) => void
 }
 
 const HISTORY_LIMIT = 60
@@ -91,5 +94,12 @@ export const useApp = create<AppState>((set) => ({
         future: s.future.slice(1),
         _lastPush: 0
       }
+    }),
+
+  setSourcePaths: (screenPath, cameraPath) =>
+    set((s) => {
+      if (!s.project) return s
+      const patch = (p: Project): Project => ({ ...p, screenPath, cameraPath })
+      return { project: patch(s.project), past: s.past.map(patch), future: s.future.map(patch) }
     })
 }))

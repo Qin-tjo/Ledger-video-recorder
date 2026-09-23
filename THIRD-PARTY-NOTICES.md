@@ -35,7 +35,6 @@ All under the permissive **MIT License** unless noted:
 - React, React DOM — MIT
 - Zustand — MIT
 - Framer Motion — MIT
-- fluent-ffmpeg — MIT
 - Vite, electron-vite, @vitejs/plugin-react — MIT
 - Tailwind CSS, PostCSS, Autoprefixer — MIT
 - TypeScript — Apache-2.0

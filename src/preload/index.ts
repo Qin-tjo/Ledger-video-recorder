@@ -7,6 +7,18 @@ export interface CaptureSource {
   type: 'screen' | 'window'
 }
 
+export interface FinishSpec {
+  fps: number
+  frames: number
+  audio: { src: string; ranges: { start: number; end: number }[] } | null
+}
+
+export interface FinishResult {
+  filePath: string
+  audio: 'ok' | 'none' | 'failed'
+  audioDetail?: string
+}
+
 export type PermStatus = 'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown'
 
 const api = {
@@ -46,12 +58,10 @@ const api = {
     close: (): void => ipcRenderer.send('bubble:close')
   },
   export: {
-    save: (
-      data: ArrayBuffer,
-      format: 'webm' | 'mp4',
-      suggested: string
-    ): Promise<{ canceled: boolean; filePath?: string }> =>
-      ipcRenderer.invoke('export:save', data, format, suggested),
+    /** Ask where to save *before* rendering, so a cancel or a bad location
+     * never wastes a whole render. Returns null when cancelled. */
+    chooseSavePath: (suggested: string): Promise<string | null> =>
+      ipcRenderer.invoke('export:chooseSavePath', suggested),
     extractFrames: (
       src: string,
       startSec: number,
@@ -63,20 +73,8 @@ const api = {
     streamWrite: (id: string, data: ArrayBuffer): Promise<void> =>
       ipcRenderer.invoke('export:streamWrite', id, data),
     streamAbort: (id: string): Promise<void> => ipcRenderer.invoke('export:streamAbort', id),
-    streamFinish: (
-      id: string,
-      wav: ArrayBuffer | null,
-      fps: number,
-      suggested: string
-    ): Promise<{ canceled: boolean; filePath?: string }> =>
-      ipcRenderer.invoke('export:streamFinish', id, wav, fps, suggested),
-    saveRendered: (
-      h264: ArrayBuffer,
-      wav: ArrayBuffer | null,
-      fps: number,
-      suggested: string
-    ): Promise<{ canceled: boolean; filePath?: string }> =>
-      ipcRenderer.invoke('export:saveRendered', h264, wav, fps, suggested),
+    streamFinish: (id: string, spec: FinishSpec, outPath: string): Promise<FinishResult> =>
+      ipcRenderer.invoke('export:streamFinish', id, spec, outPath),
     showItem: (filePath: string): Promise<void> => ipcRenderer.invoke('shell:showItem', filePath),
     keepAwake: (on: boolean): Promise<void> => ipcRenderer.invoke('power:keepAwake', on)
   }

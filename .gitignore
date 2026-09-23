@@ -6,3 +6,6 @@ dist
 *.log
 .vscode
 .idea
+
+# export test build output
+.test-build/

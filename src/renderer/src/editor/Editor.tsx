@@ -7,8 +7,7 @@ import { Button, Panel, cn } from '../components/ui'
 import { deleteClip, outputSizeFor, splitAt, totalDuration, trimClip } from '../lib/composite'
 import { uid } from '../lib/uid'
 import { usePlayback } from './usePlayback'
-import { exportProject } from './export'
-import { fastPathAvailable, renderAndSave, renderOffline, webCodecsAvailable } from './exportOffline'
+import { ensureOnDisk, exportVideo } from './exporter'
 import Timeline from './Timeline'
 import Inspector from './Inspector'
 
@@ -21,6 +20,7 @@ export default function Editor(): JSX.Element {
   const commit = useApp((s) => s.commit)
   const canUndo = useApp((s) => s.past.length > 0)
   const canRedo = useApp((s) => s.future.length > 0)
+  const setSourcePaths = useApp((s) => s.setSourcePaths)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const screenRef = useRef<HTMLVideoElement>(null)
@@ -48,6 +48,7 @@ export default function Editor(): JSX.Element {
   const [showExport, setShowExport] = useState(false)
   const [savedPath, setSavedPath] = useState<string | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
+  const [exportWarning, setExportWarning] = useState<string | null>(null)
   const [selectedZoom, setSelectedZoom] = useState<string | null>(null)
   const [selectedClip, setSelectedClip] = useState<string | null>(null)
   // When set, the next preview click places a zoom: 'new' creates one; a string
@@ -244,60 +245,46 @@ export default function Editor(): JSX.Element {
       (z) => z.id === selectedZoom || (zoomArm !== null && zoomArm !== 'new' && z.id === zoomArm)
     ) || null
 
-  async function handleExport(format: 'webm' | 'mp4'): Promise<void> {
+  async function handleExport(): Promise<void> {
     if (!project) return
     pause() // stop the preview so nothing plays during export
-    setExporting(true)
-    setProgress(0)
     setSavedPath(null)
     setExportError(null)
+    setExportWarning(null)
+
+    // Choose the destination first: cancelling costs nothing, and a location
+    // we can't write to is caught before any rendering happens.
+    let outPath: string | null
+    try {
+      outPath = await window.ledger.export.chooseSavePath('recording.mp4')
+    } catch (e) {
+      setExportError(describe(e))
+      return
+    }
+    if (!outPath) return
+
+    setExporting(true)
+    setProgress(0)
+    setStage('Preparing')
     await window.ledger.export.keepAwake(true).catch(() => {})
     try {
-      if (fastPathAvailable(project)) {
-        // Frames come from ffmpeg and the encode streams to disk: roughly an
-        // order of magnitude faster than seeking, with bounded memory.
-        let audioWarning: string | null = null
-        const res = await renderAndSave(project, 'recording.mp4', {
-          onProgress: (f, label) => {
-            setProgress(f)
-            setStage(label)
-          },
-          onAudioIssue: (reason) => {
-            audioWarning = reason
-          }
-        })
-        if (audioWarning) setExportError(`Exported without audio (${audioWarning}).`)
-        if (!res.canceled && res.filePath) setSavedPath(res.filePath)
-      } else if (webCodecsAvailable()) {
-        // Frame-exact offline render: immune to stalls, focus changes and
-        // throttling, which is what used to freeze the picture.
-        let audioWarning: string | null = null
-        const media = await renderOffline(project, {
-          onProgress: (f, label) => {
-            setProgress(f)
-            setStage(label)
-          },
-          onAudioIssue: (reason) => {
-            audioWarning = reason
-          }
-        })
-        if (audioWarning) setExportError(`Exported without audio (${audioWarning}).`)
-        const res = await window.ledger.export.saveRendered(
-          media.h264,
-          media.wav,
-          media.fps,
-          'recording.mp4'
-        )
-        if (!res.canceled && res.filePath) setSavedPath(res.filePath)
-      } else {
-        const blob = await exportProject(project, { onProgress: setProgress })
-        const buf = await blob.arrayBuffer()
-        const res = await window.ledger.export.save(buf, format, `recording.${format}`)
-        if (!res.canceled && res.filePath) setSavedPath(res.filePath)
+      const paths = await ensureOnDisk(project)
+      if (paths.screenPath !== project.screenPath) {
+        setSourcePaths(paths.screenPath, paths.cameraPath)
+      }
+      const res = await exportVideo({ ...project, ...paths }, outPath, {
+        onProgress: (f, label) => {
+          setProgress(f)
+          setStage(label)
+        }
+      })
+      if (res.filePath) setSavedPath(res.filePath)
+      if (res.audio === 'failed') {
+        setExportWarning(`The audio couldn't be included, so the video was saved without it. (${res.audioDetail})`)
       }
     } catch (e) {
       console.error(e)
-      setExportError(String(e))
+      setExportError(describe(e))
     } finally {
       setExporting(false)
       await window.ledger.export.keepAwake(false).catch(() => {})
@@ -590,12 +577,17 @@ export default function Editor(): JSX.Element {
                       {stage}… {Math.round(progress * 100)}%
                     </p>
                     <p className="text-[11px] text-white/35 text-center">
-                      You can switch to other apps — this renders frame by frame.
+                      You can keep using other apps while this runs.
                     </p>
                   </div>
                 ) : savedPath ? (
                   <div className="space-y-3">
                     <p className="text-sm text-emerald-300">Saved successfully.</p>
+                    {exportWarning && (
+                      <p className="text-[13px] text-amber-200 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-2">
+                        {exportWarning}
+                      </p>
+                    )}
                     <div className="flex gap-2">
                       <Button
                         variant="subtle"
@@ -618,6 +610,7 @@ export default function Editor(): JSX.Element {
                       onClick={() => {
                         setSavedPath(null)
                         setExportError(null)
+                        setExportWarning(null)
                       }}
                     >
                       Export again
@@ -633,13 +626,12 @@ export default function Editor(): JSX.Element {
                     <Button
                       variant="primary"
                       className="w-full"
-                      onClick={() => handleExport('mp4')}
+                      onClick={() => handleExport()}
                     >
                       Export video (MP4)
                     </Button>
                     <p className="text-[11px] text-white/35 text-center pt-1">
-                      Exports an MP4 that plays everywhere. Rendering runs in real time to
-                      preserve audio sync.
+                      Exports an MP4 that plays everywhere.
                     </p>
                   </div>
                 )}
@@ -653,6 +645,9 @@ export default function Editor(): JSX.Element {
 }
 
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v))
+
+/** An error's message without the "Error: " prefix, for display. */
+const describe = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
 // Nudge currentTime so the decoder produces a frame the canvas can draw before play.
 function primeFrame(v: HTMLVideoElement | null): void {

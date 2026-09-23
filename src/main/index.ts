@@ -4,14 +4,12 @@ import {
   BrowserWindow,
   ipcMain,
   systemPreferences,
-  dialog,
   powerSaveBlocker
 } from 'electron'
 import { join, basename, resolve, sep } from 'path'
 import { promises as fs } from 'fs'
-import * as fs2 from 'fs'
 import { registerRecordingHandlers, createBubbleWindow } from './recording'
-import { extractFramesJpeg, muxToMp4, transcodeToMp4 } from './ffmpeg'
+import { registerExportHandlers } from './exportIpc'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -181,133 +179,14 @@ ipcMain.handle('recordings:reveal', async () => {
   shell.openPath(root)
 })
 
-// ---- Export ----
-ipcMain.handle(
-  'export:save',
-  async (_e, data: ArrayBuffer, format: 'webm' | 'mp4', suggested: string) => {
-    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow!, {
-      title: 'Save recording',
-      defaultPath: suggested,
-      filters: [{ name: format.toUpperCase(), extensions: [format] }]
-    })
-    if (canceled || !filePath) return { canceled: true }
-
-    if (format === 'mp4') {
-      const tmp = join(app.getPath('temp'), `ledger-export-${Date.now()}.webm`)
-      await fs.writeFile(tmp, Buffer.from(data))
-      await transcodeToMp4(tmp, filePath)
-      await fs.unlink(tmp).catch(() => {})
-    } else {
-      await fs.writeFile(filePath, Buffer.from(data))
-    }
-    return { canceled: false, filePath }
-  }
-)
-
-// ---- Offline export pipeline ----
-// Frames come from ffmpeg (fast, deterministic) and encoded video is streamed
-// straight to a temp file, so a long export never has to hold the whole H.264
-// stream in renderer memory — that was exhausting memory and killing the codec.
-
-ipcMain.handle(
-  'export:extractFrames',
-  async (_e, src: string, startSec: number, count: number, fps: number) => {
-    const root = resolve(recordingsRoot())
-    const p = resolve(src)
-    if (p !== root && !p.startsWith(root + sep)) throw new Error('Invalid source path')
-    const buf = await extractFramesJpeg(p, startSec, count, fps)
-    return new Uint8Array(buf).buffer
-  }
-)
-
-const streams = new Map<string, { path: string; fd: fs2.WriteStream }>()
-
-ipcMain.handle('export:streamBegin', async () => {
-  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  const path = join(app.getPath('temp'), `lvr-${id}.h264`)
-  streams.set(id, { path, fd: fs2.createWriteStream(path) })
-  return id
-})
-
-ipcMain.handle('export:streamWrite', async (_e, id: string, data: ArrayBuffer) => {
-  const s = streams.get(id)
-  if (!s) throw new Error('no such export stream')
-  await new Promise<void>((res, rej) =>
-    s.fd.write(Buffer.from(data), (err) => (err ? rej(err) : res()))
-  )
-})
-
-ipcMain.handle('export:streamAbort', async (_e, id: string) => {
-  const s = streams.get(id)
-  if (!s) return
-  streams.delete(id)
-  await new Promise<void>((res) => s.fd.end(() => res()))
-  await fs.unlink(s.path).catch(() => {})
-})
-
-ipcMain.handle(
-  'export:streamFinish',
-  async (_e, id: string, wav: ArrayBuffer | null, fps: number, suggested: string) => {
-    const s = streams.get(id)
-    if (!s) throw new Error('no such export stream')
-    streams.delete(id)
-    await new Promise<void>((res) => s.fd.end(() => res()))
-
-    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow!, {
-      title: 'Save recording',
-      defaultPath: suggested,
-      filters: [{ name: 'MP4', extensions: ['mp4'] }]
-    })
-    if (canceled || !filePath) {
-      await fs.unlink(s.path).catch(() => {})
-      return { canceled: true }
-    }
-
-    const aPath = wav ? join(app.getPath('temp'), `lvr-${id}.wav`) : null
-    try {
-      if (aPath && wav) await fs.writeFile(aPath, Buffer.from(wav))
-      await muxToMp4(s.path, aPath, fps, filePath)
-    } finally {
-      await fs.unlink(s.path).catch(() => {})
-      if (aPath) await fs.unlink(aPath).catch(() => {})
-    }
-    return { canceled: false, filePath }
-  }
-)
-
-/** Save a frame-exact render: mux the H.264 + WAV the renderer produced. */
-ipcMain.handle(
-  'export:saveRendered',
-  async (_e, h264: ArrayBuffer, wav: ArrayBuffer | null, fps: number, suggested: string) => {
-    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow!, {
-      title: 'Save recording',
-      defaultPath: suggested,
-      filters: [{ name: 'MP4', extensions: ['mp4'] }]
-    })
-    if (canceled || !filePath) return { canceled: true }
-
-    const stamp = Date.now()
-    const vPath = join(app.getPath('temp'), `lvr-${stamp}.h264`)
-    const aPath = wav ? join(app.getPath('temp'), `lvr-${stamp}.wav`) : null
-    try {
-      await fs.writeFile(vPath, Buffer.from(h264))
-      if (aPath && wav) await fs.writeFile(aPath, Buffer.from(wav))
-      await muxToMp4(vPath, aPath, fps, filePath)
-    } finally {
-      await fs.unlink(vPath).catch(() => {})
-      if (aPath) await fs.unlink(aPath).catch(() => {})
-    }
-    return { canceled: false, filePath }
-  }
-)
+// ---- Export ---- (see exportIpc.ts)
 
 ipcMain.handle('shell:showItem', async (_e, filePath: string) => {
   shell.showItemInFolder(filePath)
 })
 
 // ---- Keep the machine awake while exporting ----
-// Export renders in real time; if the display sleeps the compositing stalls and
-// the output freezes. Hold a blocker for the duration.
+// A long export shouldn't be interrupted by the machine going to sleep.
 let exportBlockerId: number | null = null
 ipcMain.handle('power:keepAwake', async (_e, on: boolean) => {
   if (on) {
@@ -327,6 +206,7 @@ ipcMain.handle('bubble:open', async (_e, deviceId: string) => {
 
 app.whenReady().then(() => {
   registerRecordingHandlers()
+  registerExportHandlers({ recordingsRoot, parentWindow: () => mainWindow })
   createMainWindow()
 
   app.on('activate', () => {
