@@ -39,6 +39,60 @@ export function webCodecsAvailable(): boolean {
   return typeof window !== 'undefined' && typeof (window as never as { VideoEncoder?: unknown }).VideoEncoder === 'function'
 }
 
+/**
+ * Pick an H.264 level that can actually code `width`x`height` at `fps`.
+ *
+ * This used to be hardcoded to Main@4.0. That fits standard 1920x1080 (8160
+ * macroblocks, under the 8192 limit) but NOT a cropped 1924x1080, which rounds
+ * up to 8228 and is rejected. configure() then failed, the codec closed, and
+ * the next encode() threw a confusing "closed codec" InvalidStateError instead
+ * of the real reason.
+ *
+ * Levels are tried lowest-first so ordinary exports keep the widest device
+ * compatibility, and each candidate is checked with the browser rather than
+ * assumed.
+ */
+const AVC_LEVELS: { codec: string; maxFS: number; maxMBPS: number }[] = [
+  { codec: 'avc1.4d0028', maxFS: 8192, maxMBPS: 245760 }, // 4.0
+  { codec: 'avc1.4d002a', maxFS: 8704, maxMBPS: 522240 }, // 4.2
+  { codec: 'avc1.4d0032', maxFS: 22080, maxMBPS: 589824 }, // 5.0
+  { codec: 'avc1.4d0033', maxFS: 36864, maxMBPS: 983040 } // 5.1
+]
+
+async function encoderConfigFor(
+  width: number,
+  height: number,
+  fps: number
+): Promise<VideoEncoderConfig> {
+  const frameSize = Math.ceil(width / 16) * Math.ceil(height / 16)
+  const base = {
+    width,
+    height,
+    bitrate: 8_000_000,
+    framerate: fps,
+    avc: { format: 'annexb' as const },
+    hardwareAcceleration: 'prefer-hardware' as const
+  }
+  const VE = (window as never as { VideoEncoder: typeof VideoEncoder }).VideoEncoder
+
+  let lastReason = ''
+  for (const lvl of AVC_LEVELS) {
+    if (frameSize > lvl.maxFS || frameSize * fps > lvl.maxMBPS) continue
+    const config = { ...base, codec: lvl.codec }
+    try {
+      const support = await VE.isConfigSupported(config)
+      if (support.supported) return config
+      lastReason = `${lvl.codec} not supported`
+    } catch (e) {
+      lastReason = String(e)
+    }
+  }
+  throw new Error(
+    `no H.264 level can encode ${width}x${height} at ${fps}fps` +
+      (lastReason ? ` (${lastReason})` : '')
+  )
+}
+
 function loadVideo(src: string, muted: boolean): Promise<HTMLVideoElement> {
   const v = document.createElement('video')
   v.src = src
@@ -116,15 +170,9 @@ export async function renderOffline(
     }
   })
 
-  encoder.configure({
-    codec: 'avc1.4d0028', // H.264 Main @ 4.0 — broadly playable
-    width: project.outputWidth,
-    height: project.outputHeight,
-    bitrate: 8_000_000,
-    framerate: fps,
-    avc: { format: 'annexb' },
-    hardwareAcceleration: 'prefer-hardware'
-  })
+  encoder.configure(
+    await encoderConfigFor(project.outputWidth, project.outputHeight, fps)
+  )
 
   resetAutoGain()
   const frameDurUs = 1_000_000 / fps
@@ -347,6 +395,10 @@ export async function renderAndSave(
 
   const plan = framePlan(project, fps)
   const frameCount = plan.length
+
+  // Resolve the encoder config first: if no level can code this size there is
+  // nothing to clean up yet.
+  const encoderConfig = await encoderConfigFor(project.outputWidth, project.outputHeight, fps)
   const streamId = await window.ledger.export.streamBegin()
 
   const VE = (window as never as { VideoEncoder: typeof VideoEncoder }).VideoEncoder
@@ -366,15 +418,7 @@ export async function renderAndSave(
       encodeError = encodeError ?? e
     }
   })
-  encoder.configure({
-    codec: 'avc1.4d0028',
-    width: project.outputWidth,
-    height: project.outputHeight,
-    bitrate: 8_000_000,
-    framerate: fps,
-    avc: { format: 'annexb' },
-    hardwareAcceleration: 'prefer-hardware'
-  })
+  encoder.configure(encoderConfig)
 
   resetAutoGain()
   const frameDurUs = 1_000_000 / fps
