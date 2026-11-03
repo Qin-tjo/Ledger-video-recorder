@@ -6,7 +6,9 @@
 import { app, BrowserWindow } from 'electron'
 import { readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import { spawnSync } from 'child_process'
 import { registerExportHandlers } from '../../src/main/exportIpc'
+import { ffmpegPath, shapeFilters } from '../../src/main/ffmpeg'
 
 interface Case {
   name: string
@@ -54,6 +56,23 @@ app.whenReady().then(async () => {
       const ms = Date.now() - t0
       console.log(`${ms}ms`)
       results.push({ name: c.name, ok: true, result, ms })
+      // Quality benchmark: a lossless render of exactly the frames the export
+      // drew, through the app's own crop/scale filters, so a comparison
+      // measures only what export loses (JPEG hand-over + H.264).
+      const ref = c.reference as string | undefined
+      if (c.makeReference && ref) {
+        const g = result.source
+        const shape = {
+          content: g?.varies ? { regions: g.regions, aspect: g.aspect, alignX: g.alignX, alignY: g.alignY } : null,
+          crop: null,
+          width: result.outputWidth,
+          height: result.outputHeight
+        }
+        const vf = [...shapeFilters(shape), 'fps=30'].join(',')
+        const r = spawnSync(ffmpegPath, ['-nostdin', '-v', 'error', '-y', '-i', c.screenPath as string,
+          '-vf', vf, '-frames:v', String(c.expectFrames), '-c:v', 'ffv1', '-an', ref])
+        if (r.status !== 0) console.log(`  reference failed: ${r.stderr}`)
+      }
     } catch (e) {
       const ms = Date.now() - t0
       console.log(`threw after ${ms}ms`)

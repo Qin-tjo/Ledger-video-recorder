@@ -8,6 +8,7 @@ import {
   validateOutput,
   type FrameShape
 } from './ffmpeg'
+import { analyzeSource } from './analyzeSource'
 
 /**
  * Export pipeline, main-process side.
@@ -62,16 +63,47 @@ const int = (v: unknown, lo: number, hi: number): number => {
 function checkShape(v: unknown): FrameShape | null {
   if (v === null || v === undefined) return null
   const s = v as FrameShape
-  const crop = s.crop
-    ? {
-        x: int(s.crop.x, 0, 16384),
-        y: int(s.crop.y, 0, 16384),
-        w: int(s.crop.w, 2, 16384),
-        h: int(s.crop.h, 2, 16384)
-      }
-    : null
-  return { crop, width: int(s.width, 2, 16384), height: int(s.height, 2, 16384) }
+  let content: FrameShape['content'] = null
+  if (s.content) {
+    const regions = Array.isArray(s.content.regions) ? s.content.regions : []
+    if (regions.length > MAX_REGIONS) throw new Error('invalid export parameter')
+    content = {
+      regions: regions.map((r) => ({
+        w: int(r.w, 2, 16384),
+        h: int(r.h, 2, 16384),
+        x: int(r.x, 0, 16384),
+        y: int(r.y, 0, 16384),
+        cw: int(r.cw, 2, 16384),
+        ch: int(r.ch, 2, 16384)
+      })),
+      aspect: num(s.content.aspect, 0.05, 20),
+      alignX: num(s.content.alignX, 0, 1),
+      alignY: num(s.content.alignY, 0, 1)
+    }
+  }
+  let crop: FrameShape['crop'] = null
+  if (s.crop) {
+    crop = {
+      x: num(s.crop.x, 0, 1),
+      y: num(s.crop.y, 0, 1),
+      w: num(s.crop.w, 0.001, 1),
+      h: num(s.crop.h, 0.001, 1)
+    }
+    if (crop.x + crop.w > 1.000001 || crop.y + crop.h > 1.000001) {
+      throw new Error('invalid export parameter')
+    }
+  }
+  return {
+    content,
+    crop,
+    width: int(s.width, 2, 16384),
+    height: int(s.height, 2, 16384),
+    quality: s.quality === undefined ? undefined : int(s.quality, 1, 31)
+  }
 }
+
+/** Matches analyzeSource: frame sizes measured per recording. */
+const MAX_REGIONS = 12
 
 const TEMP_PREFIX = 'lvr-'
 const STALE_MS = 6 * 60 * 60 * 1000
@@ -134,17 +166,17 @@ export function registerExportHandlers(deps: ExportDeps): void {
 
   ipcMain.handle('export:probe', async (_e, src: string) => probeMedia(inRecordings(src)))
 
+  /** Work out the recording's real picture (see sourceGeometry.ts). Samples a
+   * few stretches so jitter that starts later in a long recording is seen. */
+  ipcMain.handle('export:analyzeSource', async (_e, src: string) => analyzeSource(inRecordings(src)))
+
   ipcMain.handle(
     'export:extractFrames',
-    async (_e, src: string, startSec: number, count: number, fps: number, shape: unknown) => {
-      const buf = await extractFramesJpeg(
-        inRecordings(src),
-        num(startSec, 0, 1e6),
-        int(count, 1, 10_000),
-        int(fps, 1, 240),
-        checkShape(shape)
-      )
-      return new Uint8Array(buf).buffer
+    async (_e, src: string, startSec: number, endSec: number, shape: unknown) => {
+      const start = num(startSec, 0, 1e6)
+      const end = num(endSec, start, start + 600)
+      const r = await extractFramesJpeg(inRecordings(src), start, end, checkShape(shape))
+      return { data: new Uint8Array(r.jpeg).buffer, pts: r.pts }
     }
   )
 

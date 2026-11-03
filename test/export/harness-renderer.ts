@@ -18,6 +18,7 @@ interface Case {
   zooms?: { start: number; end: number; scale: number; focusX: number; focusY: number }[]
   startWith?: Accel
   injectFailAt?: number
+  encoding?: Record<string, unknown>
 }
 
 ;(window as unknown as { runCase: (c: Case) => Promise<unknown> }).runCase = async (c) => {
@@ -32,7 +33,10 @@ interface Case {
     ? c.clips.map(([a, b], i) => ({ id: `c${i}`, inPoint: a, outPoint: b }))
     : makeClips(c.duration)
   p.crop = c.crop ?? null
-  const size = c.size ?? outputSizeFor(c.srcW, c.srcH, p.crop)
+  // As the editor does: analyse the real picture and size the output from it.
+  p.source = await window.ledger.export.analyzeSource(c.screenPath)
+  const pic = p.source?.varies ? { w: p.source.width, h: p.source.height } : { w: c.srcW, h: c.srcH }
+  const size = c.size ?? outputSizeFor(pic.w, pic.h, p.crop)
   p.outputWidth = size.width
   p.outputHeight = size.height
   if (c.background) Object.assign(p.background, c.background)
@@ -43,7 +47,8 @@ interface Case {
   if (!out) throw new Error('no output path')
   const res = await exportVideo(p, out, {
     startWith: c.startWith,
-    injectEncoderFailureAt: c.injectFailAt
+    injectEncoderFailureAt: c.injectFailAt,
+    encoding: c.encoding
   })
-  return { ...res, outputWidth: p.outputWidth, outputHeight: p.outputHeight }
+  return { ...res, outputWidth: p.outputWidth, outputHeight: p.outputHeight, source: p.source }
 }

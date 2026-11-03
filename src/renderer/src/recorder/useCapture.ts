@@ -20,11 +20,13 @@ async function getScreenStream(sourceId: string, mic: MediaStreamTrack | null): 
   // getDisplayMedia (ScreenCaptureKit on macOS) honors setContentProtection, so the
   // floating camera bubble is excluded from the recording.
   await window.ledger.sources.select(sourceId)
-  // Cap at 1080p: a Retina display captures at ~2940x1678, which is far more
-  // than the 1080p output ever uses and makes every stage (write, decode,
-  // export) several times slower for no visible gain.
+  // Capture at the source's native size. A size cap here makes macOS rescale
+  // every frame to fit, and for window capture it does so inconsistently: the
+  // same window arrives at several sizes, some with black bars, flipping every
+  // few seconds (1920x1050 ↔ 1918x1036 in one 18-minute recording). Native
+  // capture was stable, and sharper. Export shrinks frames itself, cheaply.
   const stream = await navigator.mediaDevices.getDisplayMedia({
-    video: { frameRate: 30, width: { max: 1920 }, height: { max: 1080 } },
+    video: { frameRate: 30 },
     audio: false
   })
   if (mic) stream.addTrack(mic)

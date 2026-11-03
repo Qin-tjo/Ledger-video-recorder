@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { defaultProject, type Project } from './lib/types'
-import { makeClips } from './lib/composite'
+import { makeClips, outputSizeFor } from './lib/composite'
+import type { SourceGeometry } from './lib/types'
 
 export interface Recording {
   screenSrc: string
@@ -26,6 +27,9 @@ interface AppState {
   /** Record where the sources live on disk. Not an edit: it isn't undoable,
    * and it's applied to history too so undo can't forget it. */
   setSourcePaths: (screenPath: string, cameraPath: string | null) => void
+  /** Record the recording's real picture and size the output from it. Not an
+   * edit, so not undoable; applied to history too. */
+  setSourceGeometry: (g: SourceGeometry) => void
 }
 
 const HISTORY_LIMIT = 60
@@ -100,6 +104,21 @@ export const useApp = create<AppState>((set) => ({
     set((s) => {
       if (!s.project) return s
       const patch = (p: Project): Project => ({ ...p, screenPath, cameraPath })
+      return { project: patch(s.project), past: s.past.map(patch), future: s.future.map(patch) }
+    }),
+
+  setSourceGeometry: (g) =>
+    set((s) => {
+      if (!s.project) return s
+      const patch = (p: Project): Project => {
+        const next = { ...p, source: g }
+        if (g.varies) {
+          const out = outputSizeFor(g.width, g.height, p.crop)
+          next.outputWidth = out.width
+          next.outputHeight = out.height
+        }
+        return next
+      }
       return { project: patch(s.project), past: s.past.map(patch), future: s.future.map(patch) }
     })
 }))

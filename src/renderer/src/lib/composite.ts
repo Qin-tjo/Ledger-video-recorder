@@ -1,4 +1,4 @@
-import type { Clip, CropRect, Project, StudioLook, ZoomEffect } from './types'
+import type { Clip, CropRect, Project, SourceGeometry, StudioLook, ZoomEffect } from './types'
 import { uid } from './uid'
 
 // Clip model ---------------------------------------------------------------
@@ -207,14 +207,14 @@ export function renderFrame(
   }
 
   if (screenVideo && screenVideo.width > 0) {
-    // Source region: the crop if one is set, otherwise the whole frame.
-    const vw = screenVideo.width
-    const vh = screenVideo.height
+    // Source region: the real picture in this frame (frames of a jittery
+    // recording vary in size), then the crop within it.
+    const pic = contentRect(screenVideo.width, screenVideo.height, p.source)
     const c = p.crop
-    const sx = c ? c.x * vw : 0
-    const sy = c ? c.y * vh : 0
-    const sw = Math.max(1, c ? c.w * vw : vw)
-    const sh = Math.max(1, c ? c.h * vh : vh)
+    const sx = pic.x + (c ? c.x * pic.w : 0)
+    const sy = pic.y + (c ? c.y * pic.h : 0)
+    const sw = Math.max(1, c ? c.w * pic.w : pic.w)
+    const sh = Math.max(1, c ? c.h * pic.h : pic.h)
 
     // object-fit: cover within rect
     const scale = Math.max(rect.w / sw, rect.h / sh) * z.scale
@@ -249,6 +249,26 @@ const even = (v: number): number => Math.max(2, Math.round(v) - (Math.round(v) %
  * shape of what you actually kept, so cropping never letterboxes or re-crops —
  * you get exactly the region you chose. H.264 needs even dimensions.
  */
+/**
+ * The steady picture within a `fw`x`fh` frame: the region measured for that
+ * frame size, or for a size never measured, the largest region of the
+ * picture's shape placed where bars were seen. Identity unless the
+ * recording's frame size varies. Mirrors shapeFilters() in main/ffmpeg.ts,
+ * which does the same for export.
+ */
+export function contentRect(
+  fw: number,
+  fh: number,
+  g: SourceGeometry | null
+): { x: number; y: number; w: number; h: number } {
+  if (!g || !g.varies) return { x: 0, y: 0, w: fw, h: fh }
+  const r = g.regions.find((m) => m.w === fw && m.h === fh)
+  if (r) return { x: r.x, y: r.y, w: r.cw, h: r.ch }
+  const w = Math.min(fw, Math.round(fh * g.aspect))
+  const h = Math.min(fh, Math.round(fw / g.aspect))
+  return { x: Math.round((fw - w) * g.alignX), y: Math.round((fh - h) * g.alignY), w, h }
+}
+
 export function outputSizeFor(
   sourceW: number,
   sourceH: number,

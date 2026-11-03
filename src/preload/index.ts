@@ -7,10 +7,31 @@ export interface CaptureSource {
   type: 'screen' | 'window'
 }
 
+export interface Region {
+  w: number
+  h: number
+  x: number
+  y: number
+  cw: number
+  ch: number
+}
+
 export interface FrameShape {
+  content: { regions: Region[]; aspect: number; alignX: number; alignY: number } | null
   crop: { x: number; y: number; w: number; h: number } | null
   width: number
   height: number
+  quality?: number
+}
+
+export interface SourceGeometry {
+  width: number
+  height: number
+  regions: Region[]
+  aspect: number
+  alignX: number
+  alignY: number
+  varies: boolean
 }
 
 export interface FinishSpec {
@@ -72,14 +93,17 @@ const api = {
       src: string
     ): Promise<{ hasVideo: boolean; hasAudio: boolean; width: number; height: number }> =>
       ipcRenderer.invoke('export:probe', src),
+    analyzeSource: (src: string): Promise<SourceGeometry | null> =>
+      ipcRenderer.invoke('export:analyzeSource', src),
+    /** Every real source frame in [startSec, endSec) as JPEGs, with each
+     * frame's timestamp. */
     extractFrames: (
       src: string,
       startSec: number,
-      count: number,
-      fps: number,
+      endSec: number,
       shape: FrameShape | null
-    ): Promise<ArrayBuffer> =>
-      ipcRenderer.invoke('export:extractFrames', src, startSec, count, fps, shape),
+    ): Promise<{ data: ArrayBuffer; pts: number[] }> =>
+      ipcRenderer.invoke('export:extractFrames', src, startSec, endSec, shape),
     streamBegin: (): Promise<string> => ipcRenderer.invoke('export:streamBegin'),
     streamWrite: (id: string, data: ArrayBuffer): Promise<void> =>
       ipcRenderer.invoke('export:streamWrite', id, data),

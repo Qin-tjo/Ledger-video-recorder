@@ -63,6 +63,25 @@ export interface CropRect {
   h: number
 }
 
+/** Where the real picture sits in the recording's frames. macOS window
+ * capture can deliver the same window at slightly different sizes with black
+ * bars; preview and export both normalise every frame back to this. Worked
+ * out by the main process (sourceGeometry.ts). */
+export interface SourceGeometry {
+  /** Size of the steady picture. */
+  width: number
+  height: number
+  /** Per frame size: where the picture is within such a frame (measured). */
+  regions: { w: number; h: number; x: number; y: number; cw: number; ch: number }[]
+  /** For a frame size not in `regions`: the largest region of this shape,
+   * placed by align (0 = left/top, 1 = right/bottom). */
+  aspect: number
+  alignX: number
+  alignY: number
+  /** Only when sizes vary is anything normalised. */
+  varies: boolean
+}
+
 export interface Project {
   screenSrc: string // blob/file url
   cameraSrc: string | null
@@ -70,9 +89,12 @@ export interface Project {
    * is far faster than seeking a <video> and always returns the exact frames. */
   screenPath: string | null
   cameraPath: string | null
+  /** null until analysed. */
+  source: SourceGeometry | null
   duration: number // seconds (source)
   clips: Clip[]
-  /** null = use the whole screen recording. */
+  /** null = use the whole screen recording. Fractions of the real picture
+   * (after normalisation), so a crop means the same thing on every frame. */
   crop: CropRect | null
   camera: CameraLayout
   background: Background
@@ -86,6 +108,7 @@ export const defaultProject = (): Project => ({
   cameraSrc: null,
   screenPath: null,
   cameraPath: null,
+  source: null,
   duration: 0,
   clips: [],
   crop: null,

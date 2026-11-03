@@ -21,6 +21,7 @@ export default function Editor(): JSX.Element {
   const canUndo = useApp((s) => s.past.length > 0)
   const canRedo = useApp((s) => s.future.length > 0)
   const setSourcePaths = useApp((s) => s.setSourcePaths)
+  const setSourceGeometry = useApp((s) => s.setSourceGeometry)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const screenRef = useRef<HTMLVideoElement>(null)
@@ -57,7 +58,32 @@ export default function Editor(): JSX.Element {
   // Crop editing: while active the preview shows the FULL frame so you can pick
   // a region, and `draftCrop` is the rectangle being dragged.
   const [draftCrop, setDraftCrop] = useState<CropRect | null>(null)
-  const [source, setSource] = useState<{ w: number; h: number } | null>(null)
+  const [rawSize, setRawSize] = useState<{ w: number; h: number } | null>(null)
+  // The recording's real picture size. For a recording whose frame size
+  // jitters, the first frame's size is only one of several — use the analysed
+  // picture instead, so the output and crop never follow the jitter.
+  const source = useMemo(
+    () =>
+      project?.source?.varies ? { w: project.source.width, h: project.source.height } : rawSize,
+    [project?.source, rawSize]
+  )
+
+  // Work out the real picture once per recording (see main/sourceGeometry.ts).
+  const screenPath = project?.screenPath
+  const analysed = !!project?.source
+  useEffect(() => {
+    if (!screenPath || analysed) return
+    let live = true
+    window.ledger.export
+      .analyzeSource(screenPath)
+      .then((g) => {
+        if (live && g) setSourceGeometry(g)
+      })
+      .catch((e) => console.warn('could not analyse the recording', e))
+    return () => {
+      live = false
+    }
+  }, [screenPath, analysed, setSourceGeometry])
 
   // While cropping, preview the uncropped frame at the source's own shape so the
   // overlay maps 1:1 onto the picture.
@@ -517,7 +543,9 @@ export default function Editor(): JSX.Element {
         onLoadedMetadata={() => {
           const v = screenRef.current
           if (!v || !v.videoWidth) return
-          setSource({ w: v.videoWidth, h: v.videoHeight })
+          setRawSize({ w: v.videoWidth, h: v.videoHeight })
+          // A jittery recording is sized from its analysed picture instead.
+          if (project.source?.varies) return
           // Match the output to the recording's own shape (screens aren't always
           // 16:9 — a 16:10 Mac display would otherwise get cover-cropped).
           const out = outputSizeFor(v.videoWidth, v.videoHeight, project.crop)
