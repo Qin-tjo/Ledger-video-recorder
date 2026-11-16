@@ -26,7 +26,7 @@ an MP4 and you're done.
 
 Ledger Video Recorder runs **entirely on your machine**. It makes **no network requests** — no
 telemetry, no analytics, no uploads. Your recordings are saved locally under the app's
-data folder (`~/Library/Application Support/Ledger Video Recorder/recordings`). Don't take our word for
+data folder (`~/Library/Application Support/ledger-video-recorder/recordings`). Don't take our word for
 it — the code is right here.
 
 ## Download & install (macOS)
